@@ -1,0 +1,74 @@
+behaviors:
+  wake:
+    cooldownMs: 1000
+    steps:
+      - { at: 0, expression: awake, motion: home, light: mint }
+      - { at: 450, sound: wake }
+
+  rest:
+    loop: true
+    cooldownMs: 30000
+    steps:
+      - { at: 0, expression: resting, motion: home, light: dim }
+      - { at: 2200, expression: blink }
+      - { at: 2500, expression: resting }
+
+  sleep:
+    steps:
+      - { at: 0, expression: sleeping, motion: home, light: off }
+
+  focus:
+    cooldownMs: 1500
+    steps:
+      - { at: 0, expression: focused, motion: nod_small, light: blue }
+      - { at: 600, motion: home }
+
+  acknowledge:
+    cooldownMs: 1200
+    steps:
+      - { at: 0, expression: happy, motion: nod_small }
+      - { at: 500, motion: home }
+
+  celebrate:
+    cooldownMs: 3000
+    steps:
+      - { at: 0, expression: delighted, sound: complete, light: rainbow, motion: happy_left }
+      - { at: 450, motion: happy_right }
+      - { at: 900, motion: home, light: mint }
+
+  worried:
+    cooldownMs: 3000
+    steps:
+      - { at: 0, expression: worried, sound: error, light: red, motion: tilt }
+      - { at: 1000, motion: home }
+
+  attention:
+    loop: true
+    cooldownMs: 5000
+    steps:
+      - { at: 0, expression: alert, sound: attention, light: amber, motion: look_left }
+      - { at: 650, motion: look_right }
+      - { at: 1300, motion: home }
+
+  curious:
+    cooldownMs: 2000
+    steps:
+      - { at: 0, expression: curious, motion: tilt, light: purple }
+      - { at: 700, motion: home }
+
+  quota_low:
+    cooldownMs: 60000
+    steps:
+      - { at: 0, expression: concerned, light: amber }
+      - { at: 900, light: mint }
+
+  quota_critical:
+    cooldownMs: 60000
+    steps:
+      - { at: 0, expression: worried, sound: attention, light: red }
+      - { at: 1400, light: dim }
+
+  quota_exhausted:
+    cooldownMs: 60000
+    steps:
+      - { at: 0, expression: sleeping, sound: error, light: red, motion: home }

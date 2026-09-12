@@ -1,0 +1,84 @@
+{
+  "name": "agentling-stackchan",
+  "productName": "Agentling StackChan",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Agentling-StackChan contributors",
+  "description": "A configurable Codex and multi-agent desktop companion for M5Stack StackChan.",
+  "main": "dist/main/index.js",
+  "bin": {
+    "agentling-mcp": "dist/mcp/index.js"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"npm:dev:electron\"",
+    "dev:electron": "tsup src/main/index.ts src/preload/index.ts --format cjs --platform node --external electron --out-dir dist --watch --onSuccess \"electron dist/main/index.js\"",
+    "build": "npm run clean && npm run build:node && npm run build:renderer",
+    "build:node": "tsup src/main/index.ts src/preload/index.ts src/mcp/index.ts --format cjs --platform node --external electron --out-dir dist",
+    "build:renderer": "vite build",
+    "clean": "rimraf dist coverage",
+    "start": "npm run build && electron dist/main/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "hooks:install": "node scripts/install-codex-hooks.mjs",
+    "firmware:build": "platformio run -d firmware",
+    "firmware:upload": "platformio run -d firmware -t upload",
+    "package:dir": "npm run build && electron-builder --dir --publish never",
+    "package:mac": "npm run build && electron-builder --mac dmg zip --arm64 --publish never"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "cbor-x": "^1.6.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "serialport": "^13.0.0",
+    "yaml": "^2.8.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
+    "rimraf": "^6.0.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.4",
+    "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  },
+  "build": {
+    "appId": "dev.agentling.stackchan",
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "files": [
+      "dist/**/*",
+      "packs/**/*",
+      "scripts/codex-hook.mjs",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "title": "Agentling StackChan ${version}"
+    }
+  }
+}

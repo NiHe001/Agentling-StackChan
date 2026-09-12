@@ -1,0 +1,7 @@
+id: agentling.default
+name: Agentling Mint
+version: 0.1.0
+protocol: 1
+author: Agentling-StackChan contributors
+description: Original procedural face and calm mint status theme.
+entryLayout: base

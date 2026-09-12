@@ -1,0 +1,12 @@
+visuals:
+  awake: { renderer: face, eyes: open, mouth: smile }
+  resting: { renderer: face, eyes: relaxed, mouth: smile }
+  sleeping: { renderer: face, eyes: closed, mouth: neutral }
+  focused: { renderer: face, eyes: focused, mouth: neutral }
+  happy: { renderer: face, eyes: open, mouth: smile }
+  delighted: { renderer: face, eyes: happy, mouth: grin }
+  worried: { renderer: face, eyes: worried, mouth: frown }
+  alert: { renderer: face, eyes: wide, mouth: open }
+  curious: { renderer: face, eyes: asymmetric, mouth: neutral }
+  concerned: { renderer: face, eyes: worried, mouth: neutral }
+  blink: { renderer: face, eyes: closed, mouth: smile }

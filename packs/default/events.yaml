@@ -1,0 +1,19 @@
+events:
+  session.started: wake
+  session.idle: rest
+  session.closed: sleep
+  turn.started: focus
+  turn.progress: focus
+  turn.completed: celebrate
+  turn.failed: worried
+  tool.started: focus
+  tool.completed: acknowledge
+  tool.failed: worried
+  approval.requested: attention
+  approval.resolved: acknowledge
+  subagent.started: curious
+  subagent.completed: acknowledge
+  usage.low: quota_low
+  usage.critical: quota_critical
+  usage.exhausted: quota_exhausted
+  usage.reset: celebrate

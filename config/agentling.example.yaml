@@ -1,0 +1,28 @@
+desktop:
+  # Set true after installing the packaged app to run it from the macOS login session.
+  openAtLogin: false
+
+server:
+  host: 127.0.0.1
+  port: 17321
+  # Set the same value in AGENTLING_TOKEN for hooks and the MCP process.
+  # token: replace-with-a-long-random-value
+
+codex:
+  enabled: true
+  # binary: /Applications/ChatGPT.app/Contents/Resources/codex
+  refreshMs: 300000
+
+weather:
+  enabled: false
+  latitude: 36.6512
+  longitude: 117.1201
+  timezone: Asia/Shanghai
+  refreshMs: 1800000
+
+device:
+  autoConnect: true
+  # preferredPath: /dev/cu.usbmodemXXXX
+  baudRate: 921600
+
+# packDir: /absolute/path/to/my-character

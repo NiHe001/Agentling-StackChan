@@ -1,0 +1,8 @@
+motions:
+  home: { yaw: 0, pitch: 0, speed: 350, holdMs: 250, releaseTorque: true }
+  nod_small: { yaw: 0, pitch: 120, speed: 420, holdMs: 350 }
+  tilt: { yaw: -160, pitch: 100, speed: 320, holdMs: 700 }
+  look_left: { yaw: -250, pitch: 0, speed: 360, holdMs: 500 }
+  look_right: { yaw: 250, pitch: 0, speed: 360, holdMs: 500 }
+  happy_left: { yaw: -220, pitch: 120, speed: 600, holdMs: 350 }
+  happy_right: { yaw: 220, pitch: 120, speed: 600, holdMs: 350 }

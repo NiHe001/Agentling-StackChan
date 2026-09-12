@@ -1,0 +1,10 @@
+node_modules/
+dist/
+release/
+coverage/
+.DS_Store
+*.log
+firmware/.pio/
+firmware/.cache/
+packs/**/*.compiled.cbor
+local.config.yaml

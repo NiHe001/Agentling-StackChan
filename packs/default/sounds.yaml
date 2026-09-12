@@ -1,0 +1,5 @@
+sounds:
+  wake: { type: tone, frequency: 880, durationMs: 80, volume: 0.35 }
+  complete: { type: melody, notes: [660, 880, 1040], noteMs: 90, volume: 0.45 }
+  attention: { type: melody, notes: [740, 520], noteMs: 120, volume: 0.40 }
+  error: { type: melody, notes: [310, 230], noteMs: 160, volume: 0.35 }

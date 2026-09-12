@@ -1,0 +1,9 @@
+lights:
+  off: { mode: solid, color: "#000000", brightness: 0 }
+  dim: { mode: breathe, color: "#173C34", brightness: 20, periodMs: 2800 }
+  mint: { mode: solid, color: "#59D185", brightness: 45 }
+  blue: { mode: chase, color: "#4BA3FF", brightness: 60, periodMs: 1100 }
+  amber: { mode: pulse, color: "#FFB020", brightness: 75, periodMs: 700 }
+  red: { mode: pulse, color: "#FF4D4F", brightness: 85, periodMs: 500 }
+  purple: { mode: chase, color: "#A978FF", brightness: 60, periodMs: 1300 }
+  rainbow: { mode: rainbow, brightness: 70, periodMs: 900 }
