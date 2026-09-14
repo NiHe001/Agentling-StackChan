@@ -103,8 +103,11 @@ layouts:
 - 单文件最大 8 MiB，角色包最大 48 MiB，最多 128 个文件；大包应使用 microSD/TF 卡。
 - 不允许绝对路径、`..`、反斜杠或符号链接。
 - 缺失硬件能力时跳过对应动作，其余时间线继续运行。
-- V1 固件支持程序化 `face`、单张 PNG 和 PNG 序列帧。单张使用
-  `{ renderer: png, asset: assets/sprites/idle.png }`；序列使用
-  `{ renderer: png_sequence, frames: [...], frameMs: 400, animation: work }`。`frameMs` 范围为
-  120–10000 ms，单序列最多 16 帧。固件也支持非阻塞 tone/melody 与左右同步 RGB 定义；
-  WAV 资源格式仍为后续扩展预留。
+- V1 固件支持程序化 `face`、单张 PNG 和 PNG 序列帧。长期状态优先使用单张、易识别的
+  姿态，仅把序列帧用于眨眼等短暂动作。单张可叠加 `ambient`、`sleep`、`focus`、
+  `ponder`、`attention`、`success`、`error`、`search` 微动作，并用
+  `accent: "#RRGGBB"` 配置环境光效颜色；旧的 `breathe`、`work`、`alert`、`celebrate`、
+  `shake` 名称继续兼容。PNG 序列的 `frameMs` 范围为 120–10000 ms，最多 16 帧。
+- 320×240 小屏建议让 `status_text` 使用 `props: { mode: headline }` 和 24 px 字号，只显示
+  权威生命周期状态；任务名放在 `task_count`，额度信息至少使用 14 px。
+- 固件支持非阻塞 tone/melody 与左右同步 RGB 定义；WAV 资源格式仍为后续扩展预留。

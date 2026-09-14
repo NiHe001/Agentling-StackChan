@@ -27,6 +27,8 @@ const EVENT_STATE: Partial<Record<CanonicalEvent["type"], AgentState>> = {
   "tool.completed": "working",
   "approval.requested": "waiting_approval",
   "approval.resolved": "working",
+  "input.requested": "needs_input",
+  "input.resolved": "working",
   "turn.completed": "completed",
   "turn.failed": "failed",
   "tool.failed": "failed",
@@ -38,6 +40,8 @@ export class StateArbiter extends EventEmitter {
   private readonly seenEventIds = new Set<string>();
   private preferredTaskId: string | null = null;
   private overlay: ExpressionOverlay | null = null;
+  private readonly disconnectedSources = new Set<string>();
+  private sourceUpdatedAt = 0;
 
   apply(event: CanonicalEvent): AgentSnapshot {
     if (this.seenEventIds.has(event.id)) return this.snapshot();
@@ -49,6 +53,17 @@ export class StateArbiter extends EventEmitter {
     if (this.overlay) {
       this.overlay = null;
       this.emit("overlay", null);
+    }
+
+    if (event.type === "source.disconnected") {
+      this.disconnectedSources.add(event.source);
+      this.sourceUpdatedAt = event.occurredAt;
+      return this.emitSnapshot();
+    }
+    if (event.type === "source.connected") {
+      this.disconnectedSources.delete(event.source);
+      this.sourceUpdatedAt = event.occurredAt;
+      return this.emitSnapshot();
     }
 
     if (event.type === "session.closed") {
@@ -83,7 +98,12 @@ export class StateArbiter extends EventEmitter {
 
     if (event.type === "tool.started") task.currentTool = event.tool || "tool";
     if (event.type === "tool.completed" || event.type === "tool.failed") task.currentTool = undefined;
-    if (event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.idle") task.currentTool = undefined;
+    if (
+      event.type === "turn.completed" ||
+      event.type === "turn.failed" ||
+      event.type === "session.idle" ||
+      event.type === "input.requested"
+    ) task.currentTool = undefined;
     if (event.type === "subagent.started") task.subagents += 1;
     if (event.type === "subagent.completed") task.subagents = Math.max(0, task.subagents - 1);
 
@@ -156,8 +176,8 @@ export class StateArbiter extends EventEmitter {
       tasks,
       reports: this.reports.map((report) => ({ ...report })),
       activeTaskId,
-      aggregateState: tasks[0]?.state ?? "idle",
-      updatedAt: Math.max(now, ...tasks.map((task) => task.updatedAt)),
+      aggregateState: this.disconnectedSources.size > 0 ? "offline" : tasks[0]?.state ?? "idle",
+      updatedAt: Math.max(now, this.sourceUpdatedAt, ...tasks.map((task) => task.updatedAt)),
     };
   }
 
@@ -214,6 +234,8 @@ function reportMessage(event: CanonicalEvent): string {
     "tool.failed": `${tool}失败`,
     "approval.requested": "等待你的批准",
     "approval.resolved": "已批准，继续执行",
+    "input.requested": "等待你的输入",
+    "input.resolved": "收到输入，继续执行",
     "subagent.started": "子任务已启动",
     "subagent.completed": "子任务已完成",
   };

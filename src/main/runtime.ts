@@ -20,11 +20,13 @@ import { CodexUsageProvider } from "./providers/codex-usage";
 import { WeatherProvider } from "./providers/weather";
 import { DeviceService } from "./services/device";
 import { LocalApiServer } from "./services/http-api";
+import { CodexSessionEventAdapter } from "./adapters/codex-session-events";
 
 const AGENT_HEARTBEAT_MS = 1_000;
 
 export class AgentlingRuntime extends EventEmitter {
   readonly hooks = new CodexHookAdapter();
+  readonly sessionEvents = new CodexSessionEventAdapter();
   readonly arbiter = new StateArbiter();
   readonly usageProvider: CodexUsageProvider;
   readonly clockProvider = new ClockProvider();
@@ -80,6 +82,7 @@ export class AgentlingRuntime extends EventEmitter {
       this.emit("log", `Configured character pack could not be loaded; using Byte Otter: ${String(error)}`);
     }
     this.hooks.subscribe((event) => this.handleCanonicalEvent(event));
+    this.sessionEvents.subscribe((event) => this.handleCanonicalEvent(event));
     this.usageProvider.subscribe((value) => {
       this.usage = value;
       this.publishWidgets();
@@ -112,7 +115,13 @@ export class AgentlingRuntime extends EventEmitter {
 
     this.clockProvider.start();
     this.weatherProvider.start();
-    await Promise.allSettled([this.hooks.start(), this.usageProvider.start(), this.device.start(), this.api.start()]);
+    await Promise.allSettled([
+      this.hooks.start(),
+      this.sessionEvents.start(),
+      this.usageProvider.start(),
+      this.device.start(),
+      this.api.start(),
+    ]);
     this.tickTimer = setInterval(() => {
       const previousState = this.arbiter.snapshot().aggregateState;
       const next = this.arbiter.tick();
@@ -133,6 +142,7 @@ export class AgentlingRuntime extends EventEmitter {
     this.weatherProvider.stop();
     await Promise.allSettled([
       this.hooks.stop(),
+      this.sessionEvents.stop(),
       this.usageProvider.stop(),
       this.device.stop(),
       this.api.stop(),

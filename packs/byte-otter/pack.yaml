@@ -1,7 +1,7 @@
 id: agentling.byte_otter
 name: Byte Otter
-version: 1.0.0
+version: 1.1.0
 protocol: 1
 author: Agentling-StackChan contributors
-description: Original programmer otter with animated work, approval, success, quota and offline states.
+description: Original programmer otter with state-led micro motion, readable status hierarchy and calm ambient effects.
 entryLayout: base

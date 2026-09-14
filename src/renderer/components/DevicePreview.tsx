@@ -45,7 +45,7 @@ export function DevicePreview({ snapshot, ui, layoutName, selectedId, onSelect, 
           widget.visible ? (
             <div
               key={widget.id}
-              className={`screen-widget ${selectedId === widget.id ? "selected" : ""}`}
+              className={`screen-widget widget-${widget.widget} ${selectedId === widget.id ? "selected" : ""}`}
               style={{
                 left: widget.rect.x * SCALE,
                 top: widget.rect.y * SCALE,
@@ -96,12 +96,13 @@ function Widget({ widget, snapshot }: { widget: WidgetConfig; snapshot: DesktopS
   }
   if (widget.widget === "status_text") {
     const task = snapshot.agent.tasks.find((entry) => entry.id === snapshot.agent.activeTaskId);
-    return <span className="ellipsis">{statusText(snapshot, task)}</span>;
+    return <strong className="ellipsis">{statusText(snapshot, task, widget.props?.mode)}</strong>;
   }
   if (widget.widget === "task_count") {
     const task = snapshot.agent.tasks.find((entry) => entry.id === snapshot.agent.activeTaskId);
     const index = task ? snapshot.agent.tasks.findIndex((entry) => entry.id === task.id) + 1 : 0;
-    return <span className="ellipsis">{task?.title || "0 TASKS"}{snapshot.agent.tasks.length > 1 ? `  ${index}/${snapshot.agent.tasks.length}` : ""}</span>;
+    const emptyText = String(widget.props?.empty_text || "等待任务");
+    return <span className="ellipsis">{task?.title || emptyText}{snapshot.agent.tasks.length > 1 ? `  ${index}/${snapshot.agent.tasks.length}` : ""}</span>;
   }
   if (widget.widget === "agent_badge") {
     return <span className="agent-badge">{String(widget.props?.label || "CODEX")}</span>;
@@ -170,18 +171,29 @@ function CharacterSprite({ snapshot }: { snapshot: DesktopSnapshot }) {
     });
     return () => { active = false; };
   }, [frameSignature, packIdentity]);
-  const source = sources[frameIndex % Math.max(1, sources.length)];
   const animation = typeof visual?.animation === "string" ? visual.animation : "none";
-  if (source) return <img className={`character-sprite visual-${animation}`} src={source} alt="Byte Otter character state" />;
-  return <Face state={snapshot.agent.aggregateState} scene={snapshot.overlay?.scene} />;
+  const source = sources[frameIndex % Math.max(1, sources.length)];
+  return (
+    <div className={`character-stage atmosphere-${animation}`} data-scene={scene}>
+      <span className="character-halo" />
+      <span className="character-orbit" aria-hidden="true"><i /><i /><i /></span>
+      <span className="character-sparkles" aria-hidden="true"><i /><i /><i /></span>
+      <div className={`character-figure visual-${animation}`}>
+        {source
+          ? <img className="character-sprite" src={source} alt="Byte Otter character state" />
+          : <Face state={snapshot.agent.aggregateState} scene={snapshot.overlay?.scene} />}
+      </div>
+    </div>
+  );
 }
 
 function stateVisual(state: string): string {
   return ({ idle: "idle", working: "working", waiting_approval: "waiting_approval", needs_input: "waiting", completed: "completed", failed: "failed", offline: "offline" } as Record<string, string>)[state] || state;
 }
 
-function statusText(snapshot: DesktopSnapshot, task?: DesktopSnapshot["agent"]["tasks"][number]): string {
+function statusText(snapshot: DesktopSnapshot, task: DesktopSnapshot["agent"]["tasks"][number] | undefined, mode: unknown): string {
   if (snapshot.overlay?.text) return snapshot.overlay.text;
+  if (mode === "headline") return stateLabel(snapshot.agent.aggregateState);
   if (!task || task.state === "idle" || snapshot.agent.aggregateState === "offline") return stateLabel(task?.state || snapshot.agent.aggregateState);
   const lifecycle = stateLabel(task.state);
   if (!task.message) return lifecycle;

@@ -12,10 +12,8 @@ behaviors:
     cooldownMs: 800
     steps:
       - { at: 0, expression: idle, light: idle_breathe }
-      - { at: 4700, expression: blink }
-      - { at: 5250, expression: resting }
-      - { at: 9700, expression: curious, light: mint_dim }
-      - { at: 11200, expression: idle, light: idle_breathe }
+      - { at: 9000, expression: resting, light: mint_dim }
+      - { at: 12000, expression: idle, light: idle_breathe }
 
   sleep:
     steps:
@@ -26,8 +24,7 @@ behaviors:
     cooldownMs: 600
     steps:
       - { at: 0, expression: working, light: work_flow }
-      - { at: 2600, expression: thinking, light: think_breathe }
-      - { at: 3900, expression: coding, light: work_flow }
+      - { at: 6000, expression: working, light: work_flow }
 
   tool_focus:
     cooldownMs: 450
@@ -59,7 +56,7 @@ behaviors:
     cooldownMs: 1800
     steps:
       - { at: 0, expression: waiting_approval, sound: approval, light: approval_pulse }
-      - { at: 2400, expression: waiting, light: approval_pulse }
+      - { at: 3000, expression: waiting_approval, light: approval_pulse }
 
   curious:
     cooldownMs: 1200

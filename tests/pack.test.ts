@@ -18,12 +18,20 @@ describe("default character pack", () => {
 });
 
 describe("Byte Otter character pack", () => {
-  it("compiles original PNG sequences and motion-free Codex behaviors", async () => {
+  it("compiles state-led micro motion and a readable small-screen layout", async () => {
     const pack = await compilePack(path.resolve("packs/byte-otter"));
     expect(pack.manifest.id).toBe("agentling.byte_otter");
     expect(pack.files.filter((file) => file.path.startsWith("assets/sprites/")).length).toBe(12);
-    expect(pack.visuals.working).toMatchObject({ renderer: "png_sequence", frameMs: 360 });
-    expect(pack.visuals.working?.frames).toHaveLength(4);
+    expect(pack.visuals.working).toMatchObject({ renderer: "png", animation: "focus" });
+    expect(pack.visuals.waiting_approval).toMatchObject({ renderer: "png", animation: "attention" });
+    expect(pack.visuals.blink).toMatchObject({ renderer: "png", animation: "ambient" });
+    expect(pack.behaviors.focus?.steps.every((step) => step.expression === "working")).toBe(true);
+    const base = resolveLayout(pack.ui, "base");
+    expect(base.find((widget) => widget.id === "status")).toMatchObject({
+      props: { mode: "headline" },
+      style: { fontSize: 24 },
+    });
+    expect(base.find((widget) => widget.id === "quota_5h")?.style?.fontSize).toBeGreaterThanOrEqual(14);
     expect(pack.behaviors.focus?.loop).toBe(true);
     expect(Object.values(pack.behaviors).flatMap((behavior) => behavior.steps).every((step) => !step.motion)).toBe(true);
     expect(pack.events["approval.requested"]).toBe("attention");

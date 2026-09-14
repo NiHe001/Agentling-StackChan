@@ -54,6 +54,7 @@ private:
     void renderConfigured();
     void renderWidget(JsonObjectConst widget, JsonObjectConst overrideValue);
     void renderFace(int x, int y, int width, int height);
+    void renderVisualAtmosphere(int x, int y, int width, int height, JsonObjectConst visual);
     void renderUsage(int x, int y, int width, int height, const String& label, const QuotaValue& quota, JsonObjectConst style);
 
     void startBehavior(const String& name);
@@ -89,6 +90,8 @@ private:
     uint32_t lastVisualUpdateAt_{0};
     int visualOffsetX_{0};
     int visualOffsetY_{0};
+    int visualScalePermille_{1000};
+    uint16_t visualPhaseStep_{0};
     bool hostOnline_{false};
     String state_{"idle"};
     String activeTaskId_;

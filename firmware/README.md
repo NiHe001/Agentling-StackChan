@@ -1,10 +1,13 @@
 # Agentling StackChan firmware
 
 Target: the official M5Stack StackChan K151 with CoreS3. The firmware uses the official
-`StackChan-BSP` Arduino library, including its feedback-servo and 12-RGB-LED drivers. Firmware 0.3
-adds the selected task title/latest report and a 1 Hz lightweight state heartbeat while keeping servo
-torque and power disabled. Repeated heartbeat content does not request another state redraw. The six LEDs on each side are updated as corresponding pairs
-and committed with one shared refresh, so breathe, pulse, and chase effects stay synchronized.
+`StackChan-BSP` Arduino library, including its feedback-servo and 12-RGB-LED drivers. Firmware 0.4.1
+renders the selected task, a 24 px lifecycle headline, readable quota details, and state-led character
+micro-motion while keeping servo torque and power disabled. The 1 Hz lightweight state heartbeat does
+not request another redraw when its content is unchanged. Device diagnostics expose the current visual
+offset, scale, and phase so animation progress can be checked without a camera. The six LEDs on each
+side are updated as corresponding pairs and committed with one shared refresh, so breathe, pulse, and
+chase effects stay synchronized.
 
 ## Build and flash
 

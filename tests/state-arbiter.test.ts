@@ -50,4 +50,22 @@ describe("StateArbiter", () => {
     expect(snapshot.tasks[0]).toMatchObject({ title: "角色包升级", message: "终端命令进行中", currentTool: "exec_command" });
     expect(snapshot.reports.slice(0, 2).map((report) => report.message)).toEqual(["终端命令进行中", "开始处理"]);
   });
+
+  it("shows an unavailable status source as offline until it reconnects", () => {
+    const arbiter = new StateArbiter();
+    arbiter.apply(event("turn.started", "task", 1_000));
+    arbiter.apply({ ...event("source.disconnected", "source", 2_000), source: "codex-session-log" });
+    expect(arbiter.snapshot().aggregateState).toBe("offline");
+    arbiter.apply({ ...event("source.connected", "source", 3_000, 2), source: "codex-session-log" });
+    expect(arbiter.snapshot().aggregateState).toBe("working");
+  });
+
+  it("distinguishes waiting for input from waiting for approval", () => {
+    const arbiter = new StateArbiter();
+    arbiter.apply(event("turn.started", "task", 1_000));
+    arbiter.apply(event("input.requested", "task", 2_000, 2));
+    expect(arbiter.snapshot().tasks[0]).toMatchObject({ state: "needs_input", message: "等待你的输入" });
+    arbiter.apply(event("input.resolved", "task", 3_000, 3));
+    expect(arbiter.snapshot().tasks[0]?.state).toBe("working");
+  });
 });

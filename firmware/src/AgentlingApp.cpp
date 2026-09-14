@@ -380,10 +380,13 @@ void AgentlingApp::parsePackCommit(CborReader& reader) {
 void AgentlingApp::sendHello() {
     protocol_.send(Serial, "device.hello", [this](CborWriter& writer) {
         writer.map(4);
-        writer.key("diagnostics"); writer.map(20);
+        writer.key("diagnostics"); writer.map(22);
         writer.key("visualCount"); writer.unsignedInteger(pack_["visuals"].size());
         writer.key("visualRenderer"); writer.text(pack_["visuals"][expression_]["renderer"] | "missing");
         writer.key("visualFrame"); writer.unsignedInteger(visualFrameIndex_);
+        writer.key("visualMotion"); writer.text(
+            String("x=") + visualOffsetX_ + ";y=" + visualOffsetY_ + ";scale=" + visualScalePermille_);
+        writer.key("visualPhase"); writer.unsignedInteger(visualPhaseStep_);
         writer.key("widgetCount"); writer.unsignedInteger(pack_["ui"]["layouts"]["base"]["widgets"].size());
         writer.key("packLoaded"); writer.boolean(hasPack_);
         writer.key("packId"); writer.text(pack_["manifest"]["id"] | "");
@@ -401,7 +404,7 @@ void AgentlingApp::sendHello() {
         writer.key("activeTaskTitle"); writer.text(activeTaskTitle_);
         writer.key("activeTaskReport"); writer.text(activeTaskReport_);
         writer.key("localTime"); writer.text(localTime_);
-        writer.key("firmwareVersion"); writer.text("0.3.0");
+        writer.key("firmwareVersion"); writer.text("0.4.1");
         writer.key("protocolVersion"); writer.unsignedInteger(AGENTLING_PROTOCOL_VERSION);
         writer.key("capabilities");
         writer.map(5);
@@ -439,7 +442,9 @@ LovyanGFX& AgentlingApp::renderTarget() {
 }
 
 String AgentlingApp::sceneForState() const {
-    if (state_ == "failed" || state_ == "waiting_approval" || state_ == "offline") return "critical";
+    if (state_ == "failed" || state_ == "waiting_approval") return "critical";
+    if (state_ == "offline") return pack_["ui"]["layouts"]["offline"].isNull() ? "critical" : "offline";
+    if (state_ == "completed") return pack_["ui"]["layouts"]["completed"].isNull() ? "base" : "completed";
     if (state_ == "needs_input") return "waiting";
     if (state_ == "working") return "working";
     if (state_ == "idle") return "idle";
@@ -466,11 +471,13 @@ void AgentlingApp::render() {
     display.fillScreen(0x0841);
     if (hasPack_) renderConfigured();
     else renderFallback();
-    if (!hostOnline_) {
-        display.fillRoundRect(226, 5, 86, 18, 4, 0x5000);
+    if (!hostOnline_ && (!hasPack_ || sceneForState() != "offline")) {
+        display.fillRoundRect(244, 5, 68, 18, 4, 0x5000);
         display.setTextColor(TFT_WHITE, 0x5000);
+        display.setFont(&fonts::efontCN_10_b);
+        display.setTextSize(1);
         display.setTextDatum(middle_center);
-        display.drawString("DESKTOP OFFLINE", 269, 14);
+        display.drawString("HOST OFF", 278, 14);
     }
     display.endWrite();
     if (canvasReady_) canvas_.pushSprite(0, 0);
@@ -482,10 +489,6 @@ void AgentlingApp::renderConfigured() {
     if (scene.isNull()) scene = layouts["base"].as<JsonObjectConst>();
     for (JsonObjectConst widget : scene["widgets"].as<JsonArrayConst>()) {
         renderWidget(widget, JsonObjectConst());
-    }
-    if (sceneForState() == "critical") {
-        uint32_t color = state_ == "waiting_approval" ? 0xffb020 : 0xff4d4f;
-        renderTarget().drawRoundRect(18, 50, 284, 132, 16, renderTarget().color565(color >> 16, color >> 8, color));
     }
 }
 
@@ -510,8 +513,14 @@ void AgentlingApp::renderWidget(JsonObjectConst widget, JsonObjectConst override
     if (widget["style"]["background"].is<const char*>() || overrideStyle["background"].is<const char*>()) {
         display.fillRoundRect(x, y, width, height, valueOr(overrideStyle, style, "radius", 0), display.color565(bg >> 16, bg >> 8, bg));
     }
-    display.setTextColor(display.color565(fg >> 16, fg >> 8, fg), display.color565(bg >> 16, bg >> 8, bg));
-    if (fontSize >= 16) display.setFont(&fonts::efontCN_16);
+    bool hasBackground = widget["style"]["background"].is<const char*>() || overrideStyle["background"].is<const char*>();
+    uint16_t foregroundColor = display.color565(fg >> 16, fg >> 8, fg);
+    uint16_t backgroundColor = display.color565(bg >> 16, bg >> 8, bg);
+    if (hasBackground) display.setTextColor(foregroundColor, backgroundColor);
+    else display.setTextColor(foregroundColor);
+    if (fontSize >= 22) display.setFont(&fonts::efontCN_24_b);
+    else if (fontSize >= 16) display.setFont(&fonts::efontCN_16);
+    else if (fontSize >= 14) display.setFont(&fonts::efontCN_14);
     else if (fontSize >= 12) display.setFont(&fonts::efontCN_12);
     else display.setFont(&fonts::efontCN_10);
     display.setTextSize(1);
@@ -526,6 +535,7 @@ void AgentlingApp::renderWidget(JsonObjectConst widget, JsonObjectConst override
     } else display.setTextDatum(middle_left);
     String type = widget["widget"] | "";
     JsonObjectConst props = widget["props"].as<JsonObjectConst>();
+    display.setClipRect(x, y, width, height);
     if (type == "sprite") renderFace(x, y, width, height);
     else if (type == "clock") display.drawString(localTime_, textX, y + height / 2);
     else if (type == "weather") {
@@ -533,7 +543,7 @@ void AgentlingApp::renderWidget(JsonObjectConst widget, JsonObjectConst override
         display.drawString(value, textX, y + height / 2);
     } else if (type == "agent_badge") display.drawString(props["label"] | "CODEX", textX, y + height / 2);
     else if (type == "task_count") {
-        String value = taskCount_ ? activeTaskTitle_ : "0 TASKS";
+        String value = taskCount_ ? activeTaskTitle_ : String(props["empty_text"] | "等待任务");
         if (taskCount_ && taskCount_ > 1) {
             size_t activeIndex = 0;
             for (size_t index = 0; index < taskCount_; ++index) {
@@ -543,13 +553,20 @@ void AgentlingApp::renderWidget(JsonObjectConst widget, JsonObjectConst override
         }
         display.drawString(value, textX, y + height / 2);
     }
-    else if (type == "status_text") display.drawString(overlayText_.isEmpty() ? statusMessage_ : overlayText_, textX, y + height / 2);
+    else if (type == "status_text") {
+        const char* mode = props["mode"] | "detail";
+        String value = !overlayText_.isEmpty()
+            ? overlayText_
+            : strcmp(mode, "headline") == 0 ? stateLabel(state_) : statusMessage_;
+        display.drawString(value, textX, y + height / 2);
+    }
     else if (type == "usage_bar" || type == "usage_text") {
         String bind = widget["bind"] | "";
         String alias = bind.substring(bind.lastIndexOf('.') + 1);
         String label = props["label"] | alias;
         renderUsage(x, y, width, height, label, quotaForAlias(alias), style);
     }
+    display.clearClipRect();
 }
 
 void AgentlingApp::renderFace(int x, int y, int width, int height) {
@@ -558,6 +575,7 @@ void AgentlingApp::renderFace(int x, int y, int width, int height) {
     if (hasPack_) {
         JsonObjectConst visual = pack_["visuals"][expression_].as<JsonObjectConst>();
         const char* renderer = visual["renderer"] | "face";
+        renderVisualAtmosphere(x, y, width, height, visual);
         // `| nullptr` selects ArduinoJson's nullptr_t overload and always
         // returns null, even when the JSON contains a valid asset string.
         const char* asset = visual["asset"].as<const char*>();
@@ -570,9 +588,20 @@ void AgentlingApp::renderFace(int x, int y, int width, int height) {
         renderError_ = String("renderer=") + renderer + ";asset=" + (asset ? asset : "null");
         if ((strcmp(renderer, "png") == 0 || strcmp(renderer, "png_sequence") == 0) && asset && asset[0] != '\0') {
             String path = String("/agentling/") + asset;
+            int scaledWidth = max(1, width * visualScalePermille_ / 1000);
+            int scaledHeight = max(1, height * visualScalePermille_ / 1000);
+            int drawX = x + visualOffsetX_ - (scaledWidth - width) / 2;
+            int drawY = y + visualOffsetY_ - (scaledHeight - height) / 2;
+            // M5GFX treats maxWidth/maxHeight as clipping bounds unless the
+            // scale arguments are zero. Fit the PNG inside the widget and use
+            // middle_center so hardware matches CSS object-fit: contain.
             bool rendered = packStore_.usesSdCard()
-                ? SD.exists(path) && renderTarget().drawPngFile(SD, path.c_str(), x + visualOffsetX_, y + visualOffsetY_, width, height)
-                : LittleFS.exists(path) && renderTarget().drawPngFile(LittleFS, path.c_str(), x + visualOffsetX_, y + visualOffsetY_, width, height);
+                ? SD.exists(path) && renderTarget().drawPngFile(
+                    SD, path.c_str(), drawX, drawY, scaledWidth, scaledHeight,
+                    0, 0, 0.0f, 0.0f, datum_t::middle_center)
+                : LittleFS.exists(path) && renderTarget().drawPngFile(
+                    LittleFS, path.c_str(), drawX, drawY, scaledWidth, scaledHeight,
+                    0, 0, 0.0f, 0.0f, datum_t::middle_center);
             if (rendered) {
                 renderedAsset_ = asset;
                 renderError_ = "";
@@ -600,6 +629,55 @@ void AgentlingApp::renderFace(int x, int y, int width, int height) {
     else display.drawArc(x + width / 2, mouthY, width / 10, width / 10 - 3, 20, 160, white);
     display.fillEllipse(x + width / 5, mouthY, width / 18, height / 30, pink);
     display.fillEllipse(x + width * 4 / 5, mouthY, width / 18, height / 30, pink);
+}
+
+void AgentlingApp::renderVisualAtmosphere(int x, int y, int width, int height, JsonObjectConst visual) {
+    const char* animation = visual["animation"] | "none";
+    uint32_t accent = parseColor(visual["accent"] | "#63E6BE", 0x63e6be);
+    LovyanGFX& display = renderTarget();
+    uint16_t color = display.color565(accent >> 16, accent >> 8, accent);
+    uint32_t elapsed = millis() - visualStartedAt_;
+    float phase = static_cast<float>(elapsed % 3200) / 3200.0f;
+    int radius = max(10, min(width, height) / 2 - 8);
+    int centerX = x + width / 2;
+    int centerY = y + height / 2;
+
+    if (strcmp(animation, "ambient") == 0 || strcmp(animation, "sleep") == 0 ||
+        strcmp(animation, "breathe") == 0 || strcmp(animation, "breathe_slow") == 0) {
+        int pulse = static_cast<int>(roundf((0.5f - 0.5f * cosf(phase * 2.0f * PI)) * 3.0f));
+        display.drawCircle(centerX, centerY + 4, radius + pulse, color);
+        return;
+    }
+    if (strcmp(animation, "focus") == 0 || strcmp(animation, "ponder") == 0 ||
+        strcmp(animation, "search") == 0 || strcmp(animation, "work") == 0 ||
+        strcmp(animation, "float") == 0) {
+        for (int index = 0; index < 3; ++index) {
+            float angle = phase * 2.0f * PI + index * 2.0f * PI / 3.0f;
+            int dotX = centerX + static_cast<int>(roundf(cosf(angle) * width * 0.43f));
+            int dotY = centerY + static_cast<int>(roundf(sinf(angle) * height * 0.37f));
+            display.fillCircle(dotX, dotY, index == 0 ? 3 : 2, color);
+        }
+        return;
+    }
+    if (strcmp(animation, "attention") == 0 || strcmp(animation, "alert") == 0) {
+        int inset = 4 + static_cast<int>(roundf((0.5f - 0.5f * cosf(phase * 4.0f * PI)) * 3.0f));
+        display.drawRoundRect(x + inset, y + inset, width - inset * 2, height - inset * 2, 16, color);
+        return;
+    }
+    if (strcmp(animation, "success") == 0 || strcmp(animation, "celebrate") == 0) {
+        const int sparkleX[3] = {x + 12, x + width - 15, x + width - 30};
+        const int sparkleY[3] = {y + 28, y + 50, y + height - 18};
+        int arm = 3 + static_cast<int>((elapsed / 160) % 3);
+        for (int index = 0; index < 3; ++index) {
+            display.drawFastHLine(sparkleX[index] - arm, sparkleY[index], arm * 2 + 1, color);
+            display.drawFastVLine(sparkleX[index], sparkleY[index] - arm, arm * 2 + 1, color);
+        }
+        return;
+    }
+    if (strcmp(animation, "error") == 0 || strcmp(animation, "shake") == 0) {
+        int inset = 6 + static_cast<int>((elapsed / 160) % 3);
+        display.drawRoundRect(x + inset, y + inset, width - inset * 2, height - inset * 2, 14, color);
+    }
 }
 
 void AgentlingApp::renderUsage(int x, int y, int width, int height, const String& label, const QuotaValue& quota, JsonObjectConst style) {
@@ -684,6 +762,8 @@ void AgentlingApp::setExpression(const String& name) {
     visualStartedAt_ = millis();
     visualOffsetX_ = 0;
     visualOffsetY_ = 0;
+    visualScalePermille_ = 1000;
+    visualPhaseStep_ = 0;
     renderDirty_ = true;
 }
 
@@ -781,17 +861,49 @@ void AgentlingApp::updateVisual() {
     uint32_t elapsed = millis() - visualStartedAt_;
     int nextX = 0;
     int nextY = 0;
-    if (strcmp(animation, "breathe") == 0) nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 2800.0f) * 2.0f));
+    int nextScale = 1000;
+    float wave = sinf(elapsed * 2.0f * PI / 3200.0f);
+    if (strcmp(animation, "ambient") == 0) {
+        nextY = static_cast<int>(roundf(wave * 2.0f));
+        nextScale = 1004 + static_cast<int>(roundf(wave * 4.0f));
+    } else if (strcmp(animation, "sleep") == 0) {
+        nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 4800.0f)));
+        nextScale = 1002 + static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 4800.0f) * 2.0f));
+    } else if (strcmp(animation, "focus") == 0) {
+        nextX = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 1900.0f)));
+        nextY = static_cast<int>(roundf(cosf(elapsed * 2.0f * PI / 1900.0f)));
+        nextScale = 1002 + static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 1900.0f) * 2.0f));
+    } else if (strcmp(animation, "ponder") == 0 || strcmp(animation, "search") == 0) {
+        nextX = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 2700.0f) * 2.0f));
+        nextY = static_cast<int>(roundf(cosf(elapsed * 2.0f * PI / 2700.0f) * 2.0f));
+    } else if (strcmp(animation, "attention") == 0) {
+        nextScale = 1005 + static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 1200.0f) * 7.0f));
+    } else if (strcmp(animation, "success") == 0) {
+        if (elapsed < 1350) {
+            float progress = static_cast<float>(elapsed) / 1350.0f;
+            nextY = -static_cast<int>(roundf(fabsf(sinf(progress * 2.0f * PI)) * (1.0f - progress) * 8.0f));
+            nextScale = 1000 + static_cast<int>(roundf(sinf(progress * PI) * 24.0f));
+        }
+    } else if (strcmp(animation, "error") == 0) {
+        if (elapsed < 1000) {
+            float decay = 1.0f - static_cast<float>(elapsed) / 1000.0f;
+            nextX = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 160.0f) * decay * 4.0f));
+        }
+    } else if (strcmp(animation, "breathe") == 0) nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 2800.0f) * 2.0f));
     else if (strcmp(animation, "breathe_slow") == 0) nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 4200.0f) * 2.0f));
     else if (strcmp(animation, "float") == 0) nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 1800.0f) * 3.0f));
     else if (strcmp(animation, "work") == 0) nextY = (elapsed / 180) % 2 ? -2 : 0;
     else if (strcmp(animation, "alert") == 0) nextY = (elapsed / 300) % 2 ? -2 : 0;
     else if (strcmp(animation, "celebrate") == 0) nextY = (elapsed / 160) % 2 ? -4 : 0;
     else if (strcmp(animation, "shake") == 0) nextX = static_cast<int>((elapsed / 120) % 3) - 1;
-    if (nextFrame != visualFrameIndex_ || nextX != visualOffsetX_ || nextY != visualOffsetY_) {
+    uint16_t nextPhaseStep = strcmp(animation, "none") == 0 ? 0 : static_cast<uint16_t>((elapsed / 160) % 20000);
+    if (nextFrame != visualFrameIndex_ || nextX != visualOffsetX_ || nextY != visualOffsetY_ ||
+        nextScale != visualScalePermille_ || nextPhaseStep != visualPhaseStep_) {
         visualFrameIndex_ = nextFrame;
         visualOffsetX_ = nextX;
         visualOffsetY_ = nextY;
+        visualScalePermille_ = nextScale;
+        visualPhaseStep_ = nextPhaseStep;
         renderDirty_ = true;
     }
 }

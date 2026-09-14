@@ -10,6 +10,8 @@ export type AgentState =
   | "failed";
 
 export type CanonicalEventType =
+  | "source.connected"
+  | "source.disconnected"
   | "session.started"
   | "session.idle"
   | "session.closed"
@@ -22,6 +24,8 @@ export type CanonicalEventType =
   | "tool.failed"
   | "approval.requested"
   | "approval.resolved"
+  | "input.requested"
+  | "input.resolved"
   | "subagent.started"
   | "subagent.completed"
   | "device.connected"

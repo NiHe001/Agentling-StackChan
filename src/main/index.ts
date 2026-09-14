@@ -11,10 +11,10 @@ let quitting = false;
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    width: 1120,
-    height: 760,
-    minWidth: 920,
-    minHeight: 640,
+    width: 1240,
+    height: 800,
+    minWidth: 980,
+    minHeight: 660,
     title: "Agentling StackChan",
     backgroundColor: "#10151f",
     show: false,

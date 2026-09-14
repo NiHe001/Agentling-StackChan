@@ -6,12 +6,15 @@ Agentling StackChan 是一个面向 M5Stack StackChan K151/CoreS3 的可配置�
 干扰和机械磨损，云台明确保持断电不动。
 
 项目不使用 Codex 桌面宠物或其他现有 IP 的内部素材；默认角色 `Byte Otter` 是为本项目
-生成的原创程序员水獭，包含 12 种状态图和连续微动画。
+生成的原创程序员水獭，包含 12 种状态图。角色不再用不同姿态快速轮播来假装动画，而是让
+固定、易识别的状态姿态叠加呼吸、专注、思考、提醒、庆祝和错误缓停等连续微动作。
 
 ## 已实现
 
-- Electron + React + TypeScript 菜单栏程序和 320×240 硬件模拟器。
-- Codex Hooks 适配器，多任务独立状态、乱序/重复事件保护和注意力优先级。
+- Electron + React + TypeScript 菜单栏程序和 320×240 硬件模拟器；控制台和真机布局均采用
+  更大的正文，真机用 24 px 状态标题、14 px 任务/额度信息建立清晰层级。
+- 本机 Codex 会话状态适配器会自动跟踪任务开始、完成、中断和等待输入；可选的 Codex Hooks
+  继续补充工具、审批和子任务进度。两路事件统一做多任务隔离、乱序/重复保护和注意力仲裁。
 - 类似 Codex 桌面端的任务动态：按任务显示最新安全报告、当前工具、子任务、审批/失败提醒和
   最近事件时间线；桌面端可点击切换，真机可滑动或触摸底部切换。
 - Codex App Server `account/rateLimits/read` 与 `account/rateLimits/updated`，按窗口时长识别
@@ -22,6 +25,7 @@ Agentling StackChan 是一个面向 M5Stack StackChan K151/CoreS3 的可配置�
 - Open-Meteo 天气 Provider，仅使用用户填写的城市经纬度，不做 IP 定位。
 - CoreS3 固件：CBOR + COBS + CRC32、序号/累计 ACK、断线标记、触摸切任务、序列帧/声音/
   同步灯光调度、云台断电、microSD 优先的事务更新及内置救援界面。
+- 固件诊断会返回当前微动画偏移、缩放和相位，便于在没有摄像头时确认真机动画引擎持续运行。
 - 状态事件立即推送，内部裁决周期 250 ms、设备心跳 1 秒；额度每分钟主动校准，同时继续
   接收 App Server 的即时更新。这些读取不调用模型、不消耗 token。
 - 为后续 Claude Code 等适配器保留稳定的 `AgentAdapter`、`DataProvider` 和标准事件接口。
@@ -47,7 +51,14 @@ npm run dev
 手动填写经纬度。HTTP 服务只监听 `127.0.0.1:17321`，如配置 `server.token`，Hooks 和 MCP
 进程需要同时设置同值的 `AGENTLING_TOKEN`。
 
-### 接入 Codex Hooks
+### Codex 状态与 Hooks
+
+桌面程序默认只读监听 `~/.codex/sessions` 中最近活跃的 JSONL，会话开始、完成、中断及
+`request_user_input` 可直接反映到桌面和真机，不需要先安装 Hook。解析器只保留任务 ID、工作
+目录和生命周期元数据，不转发或持久化提示词、回答、工具参数及工具输出；状态源暂时不可用时
+会明确显示离线，并自动重连。
+
+如需显示当前工具、审批和子任务等更细的进度，再启动桌面程序并执行：
 
 先启动桌面程序，再执行：
 
@@ -112,13 +123,14 @@ CSC_IDENTITY_AUTO_DISCOVERY=false npm run package:mac
 ## 架构与协议
 
 ```text
-Codex Hooks ───────┐
-Codex App Server ──┼──> desktop runtime ──USB Serial──> StackChan firmware
-Clock / Weather ───┘          │                            │
-MCP temporary cues ───────────┘                            ├─ display/touch
-                                                          ├─ servos off (v0.2)
-                                                          ├─ speaker
-                                                          └─ 12 RGB LEDs
+Codex session logs ─┐
+Codex Hooks ────────┤
+Codex App Server ───┼──> desktop runtime ──USB Serial──> StackChan firmware
+Clock / Weather ────┘          │                            │
+MCP temporary cues ────────────┘                            ├─ display/touch
+                                                            ├─ servos off
+                                                            ├─ speaker
+                                                            └─ 12 RGB LEDs
 ```
 
 - 主进程拥有持久状态、优先级、重连、Provider 和设备连接；渲染器不直接访问账户或串口。

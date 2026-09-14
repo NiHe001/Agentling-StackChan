@@ -1,88 +1,89 @@
 visuals:
   idle:
-    renderer: png_sequence
-    frames: [assets/sprites/idle.png, assets/sprites/idle.png, assets/sprites/curious.png, assets/sprites/idle.png]
-    frameMs: 1100
-    animation: breathe
+    renderer: png
+    asset: assets/sprites/idle.png
+    animation: ambient
+    accent: "#63E6BE"
   awake: { renderer: png, asset: assets/sprites/idle.png, animation: pop }
   resting:
-    renderer: png_sequence
-    frames: [assets/sprites/idle.png, assets/sprites/idle.png, assets/sprites/thinking.png, assets/sprites/idle.png]
-    frameMs: 1250
-    animation: breathe
+    renderer: png
+    asset: assets/sprites/idle.png
+    animation: ambient
+    accent: "#63E6BE"
   blink:
-    renderer: png_sequence
-    frames: [assets/sprites/idle.png, assets/sprites/sleeping.png, assets/sprites/idle.png]
-    frameMs: 170
-  sleeping: { renderer: png, asset: assets/sprites/sleeping.png, animation: breathe_slow }
+    renderer: png
+    asset: assets/sprites/idle.png
+    animation: ambient
+    accent: "#63E6BE"
+  sleeping: { renderer: png, asset: assets/sprites/sleeping.png, animation: sleep, accent: "#527080" }
   thinking:
-    renderer: png_sequence
-    frames: [assets/sprites/thinking.png, assets/sprites/focused.png, assets/sprites/thinking.png]
-    frameMs: 620
-    animation: float
+    renderer: png
+    asset: assets/sprites/thinking.png
+    animation: ponder
+    accent: "#56C8F5"
   focused:
-    renderer: png_sequence
-    frames: [assets/sprites/focused.png, assets/sprites/coding.png, assets/sprites/focused.png]
-    frameMs: 420
-    animation: work
+    renderer: png
+    asset: assets/sprites/focused.png
+    animation: focus
+    accent: "#56C8F5"
   working:
-    renderer: png_sequence
-    frames: [assets/sprites/coding.png, assets/sprites/focused.png, assets/sprites/coding.png, assets/sprites/thinking.png]
-    frameMs: 360
-    animation: work
+    renderer: png
+    asset: assets/sprites/coding.png
+    animation: focus
+    accent: "#56C8F5"
   coding:
-    renderer: png_sequence
-    frames: [assets/sprites/coding.png, assets/sprites/focused.png, assets/sprites/coding.png]
-    frameMs: 330
-    animation: work
+    renderer: png
+    asset: assets/sprites/coding.png
+    animation: focus
+    accent: "#56C8F5"
   progress:
-    renderer: png_sequence
-    frames: [assets/sprites/focused.png, assets/sprites/coding.png]
-    frameMs: 480
-    animation: work
+    renderer: png
+    asset: assets/sprites/focused.png
+    animation: focus
+    accent: "#56C8F5"
   complete:
-    renderer: png_sequence
-    frames: [assets/sprites/success.png, assets/sprites/idle.png, assets/sprites/success.png]
-    frameMs: 420
-    animation: celebrate
-  success: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
+    renderer: png
+    asset: assets/sprites/success.png
+    animation: success
+    accent: "#63E6BE"
+  success: { renderer: png, asset: assets/sprites/success.png, animation: success, accent: "#63E6BE" }
   completed:
-    renderer: png_sequence
-    frames: [assets/sprites/success.png, assets/sprites/idle.png, assets/sprites/success.png]
-    frameMs: 520
-    animation: celebrate
-  happy: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
-  delighted: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
-  celebrating: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
+    renderer: png
+    asset: assets/sprites/success.png
+    animation: success
+    accent: "#63E6BE"
+  happy: { renderer: png, asset: assets/sprites/success.png, animation: success, accent: "#63E6BE" }
+  delighted: { renderer: png, asset: assets/sprites/success.png, animation: success, accent: "#63E6BE" }
+  celebrating: { renderer: png, asset: assets/sprites/success.png, animation: success, accent: "#63E6BE" }
   waiting:
-    renderer: png_sequence
-    frames: [assets/sprites/waiting.png, assets/sprites/curious.png, assets/sprites/waiting.png]
-    frameMs: 650
-    animation: alert
+    renderer: png
+    asset: assets/sprites/waiting.png
+    animation: attention
+    accent: "#FFB84D"
   waiting_approval:
-    renderer: png_sequence
-    frames: [assets/sprites/waiting.png, assets/sprites/curious.png, assets/sprites/waiting.png]
-    frameMs: 650
-    animation: alert
-  alert: { renderer: png, asset: assets/sprites/waiting.png, animation: alert }
-  curious: { renderer: png, asset: assets/sprites/curious.png, animation: float }
+    renderer: png
+    asset: assets/sprites/waiting.png
+    animation: attention
+    accent: "#FFB84D"
+  alert: { renderer: png, asset: assets/sprites/waiting.png, animation: attention, accent: "#FFB84D" }
+  curious: { renderer: png, asset: assets/sprites/curious.png, animation: ponder, accent: "#56C8F5" }
   failed:
-    renderer: png_sequence
-    frames: [assets/sprites/error.png, assets/sprites/error.png, assets/sprites/offline.png]
-    frameMs: 720
-    animation: shake
-  worried: { renderer: png, asset: assets/sprites/error.png, animation: shake }
+    renderer: png
+    asset: assets/sprites/error.png
+    animation: error
+    accent: "#FF5D73"
+  worried: { renderer: png, asset: assets/sprites/error.png, animation: error, accent: "#FF5D73" }
   quota:
-    renderer: png_sequence
-    frames: [assets/sprites/quota.png, assets/sprites/thinking.png, assets/sprites/quota.png]
-    frameMs: 680
-    animation: alert
-  concerned: { renderer: png, asset: assets/sprites/quota.png, animation: alert }
-  quota_low: { renderer: png, asset: assets/sprites/quota.png, animation: alert }
-  quota_critical: { renderer: png, asset: assets/sprites/error.png, animation: shake }
+    renderer: png
+    asset: assets/sprites/quota.png
+    animation: attention
+    accent: "#FFB84D"
+  concerned: { renderer: png, asset: assets/sprites/quota.png, animation: attention, accent: "#FFB84D" }
+  quota_low: { renderer: png, asset: assets/sprites/quota.png, animation: attention, accent: "#FFB84D" }
+  quota_critical: { renderer: png, asset: assets/sprites/error.png, animation: error, accent: "#FF5D73" }
   connecting:
-    renderer: png_sequence
-    frames: [assets/sprites/connecting.png, assets/sprites/idle.png, assets/sprites/connecting.png]
-    frameMs: 500
-    animation: float
-  offline: { renderer: png, asset: assets/sprites/offline.png, animation: breathe_slow }
+    renderer: png
+    asset: assets/sprites/connecting.png
+    animation: search
+    accent: "#56C8F5"
+  offline: { renderer: png, asset: assets/sprites/offline.png, animation: sleep, accent: "#527080" }
