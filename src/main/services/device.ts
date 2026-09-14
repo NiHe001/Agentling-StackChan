@@ -18,7 +18,9 @@ import type {
 } from "../../core/types";
 import type { HostConfig } from "../config";
 
-const PACK_CHUNK_BYTES = 1024;
+// Keep enough headroom for CBOR/COBS and ESP32 allocation pressure while
+// halving the ACK count versus the original 1 KiB transfer.
+const PACK_CHUNK_BYTES = 2 * 1024;
 const SERIAL_DEBUG = process.env.AGENTLING_SERIAL_DEBUG === "1";
 
 export interface SerialPortInfo {
@@ -35,6 +37,7 @@ export class DeviceService extends EventEmitter {
   private sequence = 0;
   private lastReceivedSequence = 0;
   private lastAcknowledgedSequence = 0;
+  private syncingPack = false;
   private readonly pendingAcks = new Map<
     number,
     { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout }
@@ -47,13 +50,28 @@ export class DeviceService extends EventEmitter {
 
   async start(): Promise<void> {
     if (!this.config.autoConnect) return;
-    const ports = await this.listPorts();
-    const preferred = this.config.preferredPath
-      ? ports.find((port) => port.path === this.config.preferredPath)
-      : undefined;
-    const recognized = ports.filter((port) => /m5stack/i.test(port.manufacturer || ""));
-    const candidate = preferred ?? (recognized.length === 1 ? recognized[0] : undefined);
-    if (candidate) await this.connect(candidate.path).catch((error) => this.setError(error));
+    let lastError: unknown;
+    // USB CDC may re-enumerate just after the desktop process starts. A few
+    // bounded retries avoid requiring a manual scan without creating a
+    // permanent background reconnect loop.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const ports = await this.listPorts();
+      const preferred = this.config.preferredPath
+        ? ports.find((port) => port.path === this.config.preferredPath)
+        : undefined;
+      const recognized = ports.filter((port) => /m5stack/i.test(port.manufacturer || ""));
+      const candidate = preferred ?? (recognized.length === 1 ? recognized[0] : undefined);
+      if (candidate) {
+        try {
+          await this.connect(candidate.path);
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (attempt < 2) await delay(900 * (attempt + 1));
+    }
+    if (lastError) this.setError(lastError);
   }
 
   async stop(): Promise<void> {
@@ -96,12 +114,17 @@ export class DeviceService extends EventEmitter {
       };
       this.once("ready", onReady);
     });
-    this.send("device.hello", { client: "agentling-desktop", protocol: 1 });
+    const sendHello = () => this.send("device.hello", { client: "agentling-desktop", protocol: 1 });
+    sendHello();
+    const helloTimer = setInterval(sendHello, 750);
+    helloTimer.unref();
     try {
       await ready;
     } catch (error) {
       await this.disconnect();
       throw error;
+    } finally {
+      clearInterval(helloTimer);
     }
     return this.current();
   }
@@ -123,8 +146,37 @@ export class DeviceService extends EventEmitter {
     return structuredClone(this.status);
   }
 
+  async diagnostics(): Promise<DeviceStatus> {
+    if (!this.status.connected) throw new Error("StackChan is not connected");
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.requestDiagnostics();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (!this.status.connected) throw lastError;
+        if (attempt < 2) await delay(120);
+      }
+    }
+    throw lastError ?? new Error("Diagnostics timeout");
+  }
+
+  private requestDiagnostics(): Promise<DeviceStatus> {
+    return new Promise((resolve, reject) => {
+      const onHello = () => { clearTimeout(timer); resolve(this.current()); };
+      const timer = setTimeout(() => { this.off("diagnostics", onHello); reject(new Error("Diagnostics timeout")); }, 5000);
+      this.once("diagnostics", onHello);
+      this.send("device.hello", { client: "agentling-desktop", protocol: 1 });
+    });
+  }
+
   sendAgentSnapshot(snapshot: AgentSnapshot): void {
-    this.send("agent.snapshot", snapshot);
+    if (this.syncingPack) return;
+    // The desktop keeps the full activity timeline. The device only needs the
+    // latest report already attached to each task, which keeps the 1 Hz
+    // heartbeat small and avoids retransmitting history.
+    const { reports: _reports, ...deviceSnapshot } = snapshot;
+    this.send("agent.snapshot", deviceSnapshot);
   }
 
   sendWidgetSnapshot(payload: {
@@ -132,6 +184,7 @@ export class DeviceService extends EventEmitter {
     clock: ClockSnapshot;
     weather: WeatherSnapshot;
   }): void {
+    if (this.syncingPack) return;
     this.send("widget.snapshot", payload);
   }
 
@@ -141,58 +194,77 @@ export class DeviceService extends EventEmitter {
     overlay?: ExpressionOverlay | null;
     payload?: Record<string, unknown>;
   }): void {
+    if (this.syncingPack) return;
     this.send("action.cue", payload);
   }
 
   async syncPack(pack: CompiledPack): Promise<void> {
     if (!this.port?.isOpen) throw new Error("StackChan is not connected");
-    const runtime = Buffer.from(
-      JSON.stringify({
-        manifest: pack.manifest,
-        ui: {
-          ...pack.ui,
-          layouts: Object.fromEntries(
-            Object.keys(pack.ui.layouts).map((name) => [name, { widgets: resolveLayout(pack.ui, name) }]),
-          ),
-        },
-        events: pack.events,
-        behaviors: pack.behaviors,
-        motions: pack.motions,
-        sounds: pack.sounds,
-        lights: pack.lights,
-        visuals: pack.visuals,
-      }),
-      "utf8",
-    );
-    const runtimeFile = {
-      path: "pack.runtime.json",
-      size: runtime.length,
-      sha256: createHash("sha256").update(runtime).digest("hex"),
-    };
-    await this.sendReliable("pack.manifest", {
-      id: pack.manifest.id,
-      version: pack.manifest.version,
-      protocol: pack.manifest.protocol,
-      files: [...pack.files, runtimeFile],
-    });
-    for (const file of pack.files) {
-      const bytes = await fs.readFile(path.join(pack.sourceDir, file.path));
-      for (let offset = 0; offset < bytes.length; offset += PACK_CHUNK_BYTES) {
+    if (this.syncingPack) throw new Error("A character pack sync is already running");
+    this.syncingPack = true;
+    try {
+      const runtime = Buffer.from(
+        JSON.stringify({
+          manifest: pack.manifest,
+          ui: {
+            ...pack.ui,
+            layouts: Object.fromEntries(
+              Object.keys(pack.ui.layouts).map((name) => [name, { widgets: resolveLayout(pack.ui, name) }]),
+            ),
+          },
+          events: pack.events,
+          behaviors: pack.behaviors,
+          motions: pack.motions,
+          sounds: pack.sounds,
+          lights: pack.lights,
+          visuals: pack.visuals,
+        }),
+        "utf8",
+      );
+      const runtimeFile = {
+        path: "pack.runtime.json",
+        size: runtime.length,
+        sha256: createHash("sha256").update(runtime).digest("hex"),
+      };
+      await this.sendReliable("pack.manifest", {
+        id: pack.manifest.id,
+        version: pack.manifest.version,
+        protocol: pack.manifest.protocol,
+        files: [...pack.files, runtimeFile],
+      });
+      for (const file of pack.files) {
+        const bytes = await fs.readFile(path.join(pack.sourceDir, file.path));
+        for (let offset = 0; offset < bytes.length; offset += PACK_CHUNK_BYTES) {
+          await this.sendReliable("pack.chunk", {
+            path: file.path,
+            offset,
+            data: bytes.subarray(offset, Math.min(offset + PACK_CHUNK_BYTES, bytes.length)),
+          });
+        }
+      }
+      for (let offset = 0; offset < runtime.length; offset += PACK_CHUNK_BYTES) {
         await this.sendReliable("pack.chunk", {
-          path: file.path,
+          path: runtimeFile.path,
           offset,
-          data: bytes.subarray(offset, Math.min(offset + PACK_CHUNK_BYTES, bytes.length)),
+          data: runtime.subarray(offset, Math.min(offset + PACK_CHUNK_BYTES, runtime.length)),
         });
       }
+      await this.sendReliable("pack.commit", { id: pack.manifest.id, version: pack.manifest.version });
+      // An ACK confirms receipt, not that device-side SHA verification and
+      // atomic activation succeeded. Read back the active identity so the UI
+      // never reports a false-positive sync completion.
+      await delay(120);
+      const status = await this.diagnostics();
+      const diagnostics = status.diagnostics ?? {};
+      const activeId = String(diagnostics.packId ?? "");
+      const activeVersion = String(diagnostics.packVersion ?? "");
+      const packError = String(diagnostics.packError ?? "");
+      if (activeId !== pack.manifest.id || activeVersion !== pack.manifest.version || packError) {
+        throw new Error(packError || `StackChan kept ${activeId || "an unknown pack"} after sync`);
+      }
+    } finally {
+      this.syncingPack = false;
     }
-    for (let offset = 0; offset < runtime.length; offset += PACK_CHUNK_BYTES) {
-      await this.sendReliable("pack.chunk", {
-        path: runtimeFile.path,
-        offset,
-        data: runtime.subarray(offset, Math.min(offset + PACK_CHUNK_BYTES, runtime.length)),
-      });
-    }
-    await this.sendReliable("pack.commit", { id: pack.manifest.id, version: pack.manifest.version });
   }
 
   private send(type: DeviceEnvelope["type"], payload: unknown): number {
@@ -218,17 +290,32 @@ export class DeviceService extends EventEmitter {
         chunk.path ? `${chunk.path}@${chunk.offset ?? 0}+${chunk.data?.byteLength ?? 0}` : "",
       );
     }
-    const sequence = this.send(type, payload);
-    if (!sequence) throw new Error("StackChan is not connected");
-    if (sequence <= this.lastAcknowledgedSequence) return;
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingAcks.delete(sequence);
-        reject(new Error(`StackChan did not acknowledge ${type} (${sequence})`));
-      }, 5_000);
-      timer.unref();
-      this.pendingAcks.set(sequence, { resolve, reject, timer });
-    });
+    // File chunks are idempotent by path+offset. A fresh sequence retry heals
+    // an occasional lost USB frame/ACK during a multi-megabyte transfer.
+    // Commit stays single-shot because a lost commit ACK may still mean the
+    // atomic rename already succeeded on the device.
+    const attempts = type === "pack.commit" ? 1 : 3;
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const sequence = this.send(type, payload);
+      if (!sequence) throw new Error("StackChan is not connected");
+      if (sequence <= this.lastAcknowledgedSequence) return;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            this.pendingAcks.delete(sequence);
+            reject(new Error(`StackChan did not acknowledge ${type} (${sequence})`));
+          }, 5_000);
+          timer.unref();
+          this.pendingAcks.set(sequence, { resolve, reject, timer });
+        });
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt + 1 < attempts) await delay(80);
+      }
+    }
+    throw lastError ?? new Error(`StackChan did not acknowledge ${type}`);
   }
 
   private onData(chunk: Uint8Array): void {
@@ -241,17 +328,21 @@ export class DeviceService extends EventEmitter {
             firmwareVersion?: string;
             protocolVersion?: number;
             capabilities?: DeviceCapabilities;
+            diagnostics?: Record<string, unknown>;
           };
+          const wasConnected = this.status.connected;
           this.status = {
             ...this.status,
             connected: true,
             firmwareVersion: hello.firmwareVersion,
             protocolVersion: hello.protocolVersion,
             capabilities: hello.capabilities,
+            diagnostics: hello.diagnostics,
             error: undefined,
           };
           this.emit("status", this.current());
-          this.emit("ready");
+          this.emit("diagnostics");
+          if (!wasConnected) this.emit("ready");
         } else if (message.type === "input.event") {
           this.emit("input", message.payload);
         } else if (message.type === "error") {
@@ -292,4 +383,8 @@ export class DeviceService extends EventEmitter {
     }
     this.pendingAcks.clear();
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

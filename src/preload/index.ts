@@ -15,7 +15,9 @@ const api = {
   openPack: () => ipcRenderer.invoke("agentling:pack:open"),
   saveUi: (ui: UiConfig) => ipcRenderer.invoke("agentling:pack:save-ui", ui),
   syncPack: () => ipcRenderer.invoke("agentling:pack:sync"),
+  getPackAsset: (relativePath: string): Promise<string | null> => ipcRenderer.invoke("agentling:pack:asset", relativePath),
   refreshUsage: () => ipcRenderer.invoke("agentling:usage:refresh"),
+  selectTask: (id: string) => ipcRenderer.invoke("agentling:task:select", id),
   showExpression: (value: { scene: string; text?: string; ttlMs: number }) =>
     ipcRenderer.invoke("agentling:expression:show", value),
   clearExpression: () => ipcRenderer.invoke("agentling:expression:clear"),

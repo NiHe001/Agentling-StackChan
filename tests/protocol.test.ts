@@ -23,4 +23,12 @@ describe("device framing", () => {
     frame[3] = (frame[3] || 0) ^ 0x40;
     expect(() => decodeEnvelope(frame.slice(0, -1))).toThrow();
   });
+
+  it("recovers after a corrupt serial frame without reconnecting", () => {
+    const corrupt = encodeEnvelope(envelope);
+    corrupt[3] = (corrupt[3] || 0) ^ 0x40;
+    const decoder = new DeviceFrameDecoder();
+    expect(() => decoder.push(corrupt)).toThrow();
+    expect(decoder.push(encodeEnvelope(envelope))).toEqual([envelope]);
+  });
 });

@@ -2,6 +2,8 @@
 
 #include <FS.h>
 #include <LittleFS.h>
+#include <SD.h>
+#include <SPI.h>
 #include <mbedtls/sha256.h>
 #include <algorithm>
 
@@ -12,8 +14,25 @@ static constexpr const char* STAGING_ROOT = "/agentling.staging";
 static constexpr const char* BACKUP_ROOT = "/agentling.previous";
 
 bool PackStore::begin() {
-    available_ = LittleFS.begin(true);
-    if (!available_) error_ = "LittleFS mount failed; using built-in rescue UI";
+    littleFsAvailable_ = LittleFS.begin(true);
+    // CoreS3 exposes its TF slot on the board SPI bus with CS on GPIO4. Use
+    // the card when present, while retaining LittleFS as a no-card fallback.
+    sdAvailable_ = SD.begin(GPIO_NUM_4, SPI, 25'000'000) && SD.cardType() != CARD_NONE;
+    if (sdAvailable_ && SD.exists(String(ACTIVE_ROOT) + "/pack.runtime.json")) {
+        activeStorage_ = &SD;
+        activeStorageName_ = "microSD";
+    } else if (littleFsAvailable_ && LittleFS.exists(String(ACTIVE_ROOT) + "/pack.runtime.json")) {
+        activeStorage_ = &LittleFS;
+        activeStorageName_ = "LittleFS";
+    } else if (sdAvailable_) {
+        activeStorage_ = &SD;
+        activeStorageName_ = "microSD";
+    } else if (littleFsAvailable_) {
+        activeStorage_ = &LittleFS;
+        activeStorageName_ = "LittleFS";
+    }
+    available_ = activeStorage_ != nullptr;
+    if (!available_) error_ = "microSD and LittleFS mount failed; using built-in rescue UI";
     return available_;
 }
 
@@ -23,29 +42,33 @@ bool PackStore::beginTransaction(
     const std::vector<ExpectedFile>& files
 ) {
     if (!available_) return false;
+    closeTransactionFile();
+    transactionStorage_ = sdAvailable_ ? static_cast<fs::FS*>(&SD) : activeStorage_;
+    if (!transactionStorage_) return false;
     if (files.empty() || files.size() > 128) {
         error_ = "invalid pack file count";
         return false;
     }
     size_t total = 0;
     for (const auto& file : files) {
-        if (!safePath(file.path) || file.size > 2 * 1024 * 1024) {
+        if (!safePath(file.path) || file.size > 8 * 1024 * 1024) {
             error_ = "unsafe or oversized pack file";
             return false;
         }
         total += file.size;
     }
-    const size_t capacity = LittleFS.totalBytes();
-    const size_t reserve = std::min<size_t>(capacity, 64 * 1024);
+    const uint64_t capacity = transactionStorage_ == static_cast<fs::FS*>(&SD)
+        ? SD.totalBytes() : LittleFS.totalBytes();
+    const uint64_t reserve = std::min<uint64_t>(capacity, 64 * 1024);
     if (total > capacity - reserve) {
-        error_ = "pack exceeds available LittleFS space";
+        error_ = "pack exceeds available storage capacity";
         return false;
     }
-    if (!removeTree(STAGING_ROOT)) {
+    if (!removeTree(*transactionStorage_, STAGING_ROOT)) {
         error_ = "cannot clear staging directory";
         return false;
     }
-    if (!LittleFS.mkdir(STAGING_ROOT)) {
+    if (!transactionStorage_->mkdir(STAGING_ROOT)) {
         error_ = "cannot create staging directory";
         return false;
     }
@@ -61,7 +84,7 @@ bool PackStore::writeChunk(
     size_t offset,
     const std::vector<uint8_t>& data
 ) {
-    if (!available_ || transactionId_.isEmpty() || !safePath(relativePath)) return false;
+    if (!available_ || !transactionStorage_ || transactionId_.isEmpty() || !safePath(relativePath)) return false;
     auto found = std::find_if(expectedFiles_.begin(), expectedFiles_.end(), [&](const ExpectedFile& file) {
         return file.path == relativePath;
     });
@@ -70,54 +93,81 @@ bool PackStore::writeChunk(
         return false;
     }
     String path = String(STAGING_ROOT) + "/" + relativePath;
-    if (!ensureParentDirectories(path)) return false;
-    // FILE_WRITE is "w" on Arduino-ESP32 and truncates an existing file.
-    // Create/truncate only the first chunk; later chunks must preserve data.
-    File file = LittleFS.open(path, offset == 0 ? FILE_WRITE : "r+");
-    if (!file || !file.seek(offset)) {
-        error_ = "cannot open or seek pack file";
+    if (transactionFilePath_ != path) {
+        closeTransactionFile();
+        if (offset != 0 || !ensureParentDirectories(*transactionStorage_, path)) {
+            error_ = "pack file did not start at offset zero";
+            return false;
+        }
+        transactionFile_ = transactionStorage_->open(path, FILE_WRITE);
+        if (!transactionFile_) {
+            error_ = "cannot open pack file";
+            return false;
+        }
+        transactionFilePath_ = path;
+        transactionFileOffset_ = 0;
+    }
+    // A host retry can repeat a fully written chunk after its ACK was lost.
+    if (offset < transactionFileOffset_ && offset + data.size() <= transactionFileOffset_) return true;
+    if (offset != transactionFileOffset_) {
+        error_ = "non-sequential pack chunk";
         return false;
     }
-    size_t written = file.write(data.data(), data.size());
-    file.close();
+    size_t written = transactionFile_.write(data.data(), data.size());
     if (written != data.size()) {
         error_ = "short write while syncing pack";
         return false;
     }
+    transactionFileOffset_ += written;
     return true;
 }
 
 bool PackStore::commit(const String& id, const String& version) {
+    closeTransactionFile();
     if (id != transactionId_ || version != transactionVersion_) {
         error_ = "pack commit does not match transaction";
         return false;
     }
+    if (!transactionStorage_) return false;
+    fs::FS& storage = *transactionStorage_;
     for (const auto& expected : expectedFiles_) {
-        if (!verifyFile(expected)) return false;
+        if (!verifyFile(storage, expected)) return false;
     }
-    if (!removeTree(BACKUP_ROOT)) {
+    if (!removeTree(storage, BACKUP_ROOT)) {
         error_ = "cannot clear previous rollback copy";
         return false;
     }
-    if (LittleFS.exists(ACTIVE_ROOT) && !LittleFS.rename(ACTIVE_ROOT, BACKUP_ROOT)) {
+    if (storage.exists(ACTIVE_ROOT) && !storage.rename(ACTIVE_ROOT, BACKUP_ROOT)) {
         error_ = "cannot create pack rollback copy";
         return false;
     }
-    if (!LittleFS.rename(STAGING_ROOT, ACTIVE_ROOT)) {
-        if (LittleFS.exists(BACKUP_ROOT)) LittleFS.rename(BACKUP_ROOT, ACTIVE_ROOT);
+    if (!storage.rename(STAGING_ROOT, ACTIVE_ROOT)) {
+        if (storage.exists(BACKUP_ROOT)) storage.rename(BACKUP_ROOT, ACTIVE_ROOT);
         error_ = "cannot activate pack; previous pack restored";
         return false;
     }
     transactionId_ = "";
     transactionVersion_ = "";
     expectedFiles_.clear();
+    activeStorage_ = transactionStorage_;
+    activeStorageName_ = activeStorage_ == static_cast<fs::FS*>(&SD) ? "microSD" : "LittleFS";
+    transactionStorage_ = nullptr;
     error_ = "";
     return true;
 }
 
+void PackStore::closeTransactionFile() {
+    if (transactionFile_) {
+        transactionFile_.flush();
+        transactionFile_.close();
+    }
+    transactionFilePath_ = "";
+    transactionFileOffset_ = 0;
+}
+
 bool PackStore::loadRuntime(JsonDocument& target) {
-    if (!available_) return false;
-    File file = LittleFS.open(String(ACTIVE_ROOT) + "/pack.runtime.json", FILE_READ);
+    if (!available_ || !activeStorage_) return false;
+    File file = activeStorage_->open(String(ACTIVE_ROOT) + "/pack.runtime.json", FILE_READ);
     if (!file) return false;
     DeserializationError result = deserializeJson(target, file);
     file.close();
@@ -133,11 +183,11 @@ bool PackStore::safePath(const String& path) const {
     return !path.isEmpty() && !path.startsWith("/") && path.indexOf("..") < 0 && path.indexOf('\\') < 0;
 }
 
-bool PackStore::ensureParentDirectories(const String& path) {
+bool PackStore::ensureParentDirectories(fs::FS& storage, const String& path) {
     int cursor = 1;
     while ((cursor = path.indexOf('/', cursor)) >= 0) {
         String directory = path.substring(0, cursor);
-        if (!LittleFS.exists(directory) && !LittleFS.mkdir(directory)) {
+        if (!storage.exists(directory) && !storage.mkdir(directory)) {
             error_ = "cannot create pack directory";
             return false;
         }
@@ -146,9 +196,9 @@ bool PackStore::ensureParentDirectories(const String& path) {
     return true;
 }
 
-bool PackStore::verifyFile(const ExpectedFile& expected) {
+bool PackStore::verifyFile(fs::FS& storage, const ExpectedFile& expected) {
     String path = String(STAGING_ROOT) + "/" + expected.path;
-    File file = LittleFS.open(path, FILE_READ);
+    File file = storage.open(path, FILE_READ);
     if (!file || static_cast<size_t>(file.size()) != expected.size) {
         error_ = String("missing or incomplete file: ") + expected.path;
         if (file) file.close();
@@ -176,13 +226,13 @@ bool PackStore::verifyFile(const ExpectedFile& expected) {
     return true;
 }
 
-bool PackStore::removeTree(const String& path) {
-    if (!LittleFS.exists(path)) return true;
-    File root = LittleFS.open(path);
+bool PackStore::removeTree(fs::FS& storage, const String& path) {
+    if (!storage.exists(path)) return true;
+    File root = storage.open(path);
     if (!root) return false;
     if (!root.isDirectory()) {
         root.close();
-        return LittleFS.remove(path);
+        return storage.remove(path);
     }
     bool success = true;
     File entry;
@@ -190,11 +240,25 @@ bool PackStore::removeTree(const String& path) {
         String child = entry.path();
         bool directory = entry.isDirectory();
         entry.close();
-        if (directory) success = removeTree(child) && success;
-        else success = LittleFS.remove(child) && success;
+        if (directory) success = removeTree(storage, child) && success;
+        else success = storage.remove(child) && success;
     }
     root.close();
-    return LittleFS.rmdir(path) && success;
+    return storage.rmdir(path) && success;
+}
+
+uint64_t PackStore::totalBytes() const {
+    if (activeStorage_ == static_cast<const fs::FS*>(&SD)) return SD.totalBytes();
+    return littleFsAvailable_ ? LittleFS.totalBytes() : 0;
+}
+
+uint64_t PackStore::usedBytes() const {
+    if (activeStorage_ == static_cast<const fs::FS*>(&SD)) return SD.usedBytes();
+    return littleFsAvailable_ ? LittleFS.usedBytes() : 0;
+}
+
+fs::FS& PackStore::filesystem() {
+    return activeStorage_ ? *activeStorage_ : static_cast<fs::FS&>(LittleFS);
 }
 
 }  // namespace agentling

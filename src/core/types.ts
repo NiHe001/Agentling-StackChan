@@ -58,10 +58,24 @@ export interface TaskSnapshot {
   startedAt: number;
   updatedAt: number;
   sequence?: number;
+  lastEvent?: CanonicalEventType;
+}
+
+export interface TaskReport {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  source: string;
+  type: CanonicalEventType;
+  state: AgentState;
+  message: string;
+  tool?: string;
+  occurredAt: number;
 }
 
 export interface AgentSnapshot {
   tasks: TaskSnapshot[];
+  reports: TaskReport[];
   activeTaskId: string | null;
   aggregateState: AgentState;
   updatedAt: number;
@@ -248,6 +262,7 @@ export interface DeviceCapabilities {
 }
 
 export interface DeviceStatus {
+  diagnostics?: Record<string, unknown>;
   connected: boolean;
   path?: string;
   firmwareVersion?: string;

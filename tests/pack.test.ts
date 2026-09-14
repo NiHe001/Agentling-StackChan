@@ -16,3 +16,18 @@ describe("default character pack", () => {
     }
   });
 });
+
+describe("Byte Otter character pack", () => {
+  it("compiles original PNG sequences and motion-free Codex behaviors", async () => {
+    const pack = await compilePack(path.resolve("packs/byte-otter"));
+    expect(pack.manifest.id).toBe("agentling.byte_otter");
+    expect(pack.files.filter((file) => file.path.startsWith("assets/sprites/")).length).toBe(12);
+    expect(pack.visuals.working).toMatchObject({ renderer: "png_sequence", frameMs: 360 });
+    expect(pack.visuals.working?.frames).toHaveLength(4);
+    expect(pack.behaviors.focus?.loop).toBe(true);
+    expect(Object.values(pack.behaviors).flatMap((behavior) => behavior.steps).every((step) => !step.motion)).toBe(true);
+    expect(pack.events["approval.requested"]).toBe("attention");
+    expect(pack.events["tool.completed"]).toBe("focus");
+    expect(pack.events["approval.resolved"]).toBe("focus");
+  });
+});

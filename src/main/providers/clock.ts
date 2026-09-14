@@ -7,6 +7,7 @@ export class ClockProvider extends EventEmitter implements DataProvider<ClockSna
 
   start(): void {
     if (this.timer) return;
+    this.emit("value", this.value());
     this.timer = setInterval(() => this.emit("value", this.value()), 1_000);
     this.timer.unref();
   }

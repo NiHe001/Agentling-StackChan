@@ -1,0 +1,88 @@
+visuals:
+  idle:
+    renderer: png_sequence
+    frames: [assets/sprites/idle.png, assets/sprites/idle.png, assets/sprites/curious.png, assets/sprites/idle.png]
+    frameMs: 1100
+    animation: breathe
+  awake: { renderer: png, asset: assets/sprites/idle.png, animation: pop }
+  resting:
+    renderer: png_sequence
+    frames: [assets/sprites/idle.png, assets/sprites/idle.png, assets/sprites/thinking.png, assets/sprites/idle.png]
+    frameMs: 1250
+    animation: breathe
+  blink:
+    renderer: png_sequence
+    frames: [assets/sprites/idle.png, assets/sprites/sleeping.png, assets/sprites/idle.png]
+    frameMs: 170
+  sleeping: { renderer: png, asset: assets/sprites/sleeping.png, animation: breathe_slow }
+  thinking:
+    renderer: png_sequence
+    frames: [assets/sprites/thinking.png, assets/sprites/focused.png, assets/sprites/thinking.png]
+    frameMs: 620
+    animation: float
+  focused:
+    renderer: png_sequence
+    frames: [assets/sprites/focused.png, assets/sprites/coding.png, assets/sprites/focused.png]
+    frameMs: 420
+    animation: work
+  working:
+    renderer: png_sequence
+    frames: [assets/sprites/coding.png, assets/sprites/focused.png, assets/sprites/coding.png, assets/sprites/thinking.png]
+    frameMs: 360
+    animation: work
+  coding:
+    renderer: png_sequence
+    frames: [assets/sprites/coding.png, assets/sprites/focused.png, assets/sprites/coding.png]
+    frameMs: 330
+    animation: work
+  progress:
+    renderer: png_sequence
+    frames: [assets/sprites/focused.png, assets/sprites/coding.png]
+    frameMs: 480
+    animation: work
+  complete:
+    renderer: png_sequence
+    frames: [assets/sprites/success.png, assets/sprites/idle.png, assets/sprites/success.png]
+    frameMs: 420
+    animation: celebrate
+  success: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
+  completed:
+    renderer: png_sequence
+    frames: [assets/sprites/success.png, assets/sprites/idle.png, assets/sprites/success.png]
+    frameMs: 520
+    animation: celebrate
+  happy: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
+  delighted: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
+  celebrating: { renderer: png, asset: assets/sprites/success.png, animation: celebrate }
+  waiting:
+    renderer: png_sequence
+    frames: [assets/sprites/waiting.png, assets/sprites/curious.png, assets/sprites/waiting.png]
+    frameMs: 650
+    animation: alert
+  waiting_approval:
+    renderer: png_sequence
+    frames: [assets/sprites/waiting.png, assets/sprites/curious.png, assets/sprites/waiting.png]
+    frameMs: 650
+    animation: alert
+  alert: { renderer: png, asset: assets/sprites/waiting.png, animation: alert }
+  curious: { renderer: png, asset: assets/sprites/curious.png, animation: float }
+  failed:
+    renderer: png_sequence
+    frames: [assets/sprites/error.png, assets/sprites/error.png, assets/sprites/offline.png]
+    frameMs: 720
+    animation: shake
+  worried: { renderer: png, asset: assets/sprites/error.png, animation: shake }
+  quota:
+    renderer: png_sequence
+    frames: [assets/sprites/quota.png, assets/sprites/thinking.png, assets/sprites/quota.png]
+    frameMs: 680
+    animation: alert
+  concerned: { renderer: png, asset: assets/sprites/quota.png, animation: alert }
+  quota_low: { renderer: png, asset: assets/sprites/quota.png, animation: alert }
+  quota_critical: { renderer: png, asset: assets/sprites/error.png, animation: shake }
+  connecting:
+    renderer: png_sequence
+    frames: [assets/sprites/connecting.png, assets/sprites/idle.png, assets/sprites/connecting.png]
+    frameMs: 500
+    animation: float
+  offline: { renderer: png, asset: assets/sprites/offline.png, animation: breathe_slow }

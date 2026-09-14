@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <LittleFS.h>
+#include <SD.h>
 #include <M5StackChan.h>
 #include <array>
 
@@ -20,6 +22,10 @@ struct QuotaValue {
 struct TaskValue {
     String id;
     String title;
+    String state;
+    String currentTool;
+    String message;
+    uint8_t subagents{0};
 };
 
 class AgentlingApp {
@@ -29,7 +35,7 @@ public:
 
 private:
     void handleEnvelope(const EnvelopeView& envelope);
-    void parseAgentSnapshot(CborReader& reader);
+    bool parseAgentSnapshot(CborReader& reader);
     void parseWidgetSnapshot(CborReader& reader);
     void parseUsage(CborReader& reader);
     void parseClock(CborReader& reader);
@@ -53,12 +59,17 @@ private:
     void startBehavior(const String& name);
     void updateBehavior();
     void applyBehaviorStep(JsonObjectConst step);
+    void setExpression(const String& name);
     void applyMotion(const String& name);
     void applySound(const String& name);
+    void updateSound();
     void applyLight(const String& name);
+    void updateLight();
+    void updateVisual();
     void updateTouch();
     void updateIdle();
     String sceneForState() const;
+    String expressionForState() const;
     QuotaValue quotaForAlias(const String& alias) const;
 
     static uint32_t parseColor(const char* value, uint32_t fallback);
@@ -71,10 +82,18 @@ private:
     bool canvasReady_{false};
     bool renderDirty_{true};
     bool hasPack_{false};
+    String renderedAsset_;
+    String renderError_;
+    size_t visualFrameIndex_{0};
+    uint32_t visualStartedAt_{0};
+    uint32_t lastVisualUpdateAt_{0};
+    int visualOffsetX_{0};
+    int visualOffsetY_{0};
     bool hostOnline_{false};
     String state_{"idle"};
     String activeTaskId_;
     String activeTaskTitle_;
+    String activeTaskReport_;
     String statusMessage_;
     String expression_{"resting"};
     String overlayText_;
@@ -98,6 +117,17 @@ private:
     uint32_t lastRenderAt_{0};
     uint32_t idleStartedAt_{0};
     uint32_t lastIdleEventAt_{0};
+    std::array<uint16_t, 8> melodyNotes_{};
+    size_t melodyCount_{0};
+    size_t melodyIndex_{0};
+    uint16_t melodyNoteMs_{90};
+    uint32_t melodyNextAt_{0};
+    String lightMode_{"solid"};
+    uint32_t lightColor_{0};
+    uint8_t lightBrightness_{0};
+    uint32_t lightPeriodMs_{1000};
+    uint32_t lightStartedAt_{0};
+    uint32_t lastLightUpdateAt_{0};
     bool touchDown_{false};
     int touchStartX_{0};
     int touchStartY_{0};

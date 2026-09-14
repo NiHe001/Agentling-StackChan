@@ -21,8 +21,8 @@ const REQUIRED_FILES = [
   "visuals.yaml",
   "ui.yaml",
 ] as const;
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_PACK_BYTES = 12 * 1024 * 1024;
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_PACK_BYTES = 48 * 1024 * 1024;
 
 export class PackValidationError extends Error {
   constructor(readonly issues: string[]) {
@@ -143,6 +143,24 @@ export async function compilePack(root: string): Promise<CompiledPack> {
 
   if (uiResult.success) validateLayouts(uiResult.data, issues);
   const files = await inventoryPackFiles(absoluteRoot, issues);
+  const filePaths = new Set(files.map((file) => file.path));
+  for (const [name, visual] of Object.entries(visuals)) {
+    const renderer = visual.renderer;
+    if (renderer === "png") {
+      validateVisualAsset(name, "asset", visual.asset, filePaths, issues);
+    } else if (renderer === "png_sequence") {
+      if (!Array.isArray(visual.frames) || visual.frames.length < 2 || visual.frames.length > 16) {
+        issues.push(`visuals.${name}.frames: PNG sequences require 2 to 16 frames`);
+      } else {
+        visual.frames.forEach((asset, index) =>
+          validateVisualAsset(name, `frames.${index}`, asset, filePaths, issues),
+        );
+      }
+      if (!Number.isInteger(visual.frameMs) || Number(visual.frameMs) < 120 || Number(visual.frameMs) > 10_000) {
+        issues.push(`visuals.${name}.frameMs: expected an integer from 120 to 10000`);
+      }
+    }
+  }
   if (issues.length > 0 || !manifestResult.success || !uiResult.success) {
     throw new PackValidationError(issues);
   }
@@ -165,6 +183,20 @@ export async function compilePack(root: string): Promise<CompiledPack> {
     sourceDir: absoluteRoot,
     files,
   };
+}
+
+function validateVisualAsset(
+  name: string,
+  field: string,
+  asset: unknown,
+  filePaths: Set<string>,
+  issues: string[],
+): void {
+  if (typeof asset !== "string" || !asset.startsWith("assets/sprites/")) {
+    issues.push(`visuals.${name}.${field}: PNG visuals must reference assets/sprites`);
+  } else if (!filePaths.has(asset)) {
+    issues.push(`visuals.${name}.${field}: file '${asset}' does not exist`);
+  }
 }
 
 function validateLayouts(ui: UiConfig, issues: string[]): void {
@@ -214,7 +246,7 @@ async function inventoryPackFiles(
       if (!entry.isFile()) continue;
       const relative = path.relative(root, absolute).split(path.sep).join("/");
       const content = await fs.readFile(absolute);
-      if (content.length > MAX_FILE_BYTES) issues.push(`${relative}: exceeds 2 MiB file limit`);
+      if (content.length > MAX_FILE_BYTES) issues.push(`${relative}: exceeds 8 MiB file limit`);
       total += content.length;
       files.push({
         path: relative,
@@ -224,7 +256,7 @@ async function inventoryPackFiles(
     }
   };
   await visit(root);
-  if (total > MAX_PACK_BYTES) issues.push("pack exceeds 12 MiB total size limit");
+  if (total > MAX_PACK_BYTES) issues.push("pack exceeds 48 MiB total size limit");
   return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 

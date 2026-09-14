@@ -1,0 +1,3 @@
+# Head servos are deliberately disabled in firmware 0.2.x. Keep this file so
+# packs remain forward-compatible when motion is explicitly re-enabled later.
+motions: {}

@@ -11,7 +11,8 @@ server:
 codex:
   enabled: true
   # binary: /Applications/ChatGPT.app/Contents/Resources/codex
-  refreshMs: 300000
+  # Local App Server read only; it does not call a model or consume tokens.
+  refreshMs: 60000
 
 weather:
   enabled: false

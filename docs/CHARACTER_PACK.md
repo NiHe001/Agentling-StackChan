@@ -100,8 +100,11 @@ layouts:
 
 ## 限制与降级
 
-- 单文件最大 2 MiB，角色包最大 12 MiB，最多 128 个文件。
+- 单文件最大 8 MiB，角色包最大 48 MiB，最多 128 个文件；大包应使用 microSD/TF 卡。
 - 不允许绝对路径、`..`、反斜杠或符号链接。
 - 缺失硬件能力时跳过对应动作，其余时间线继续运行。
-- V1 固件原生支持程序化 `face`、tone/melody 与 RGB 定义；同步的图片/WAV 资源格式已保留，
-  后续渲染器可在不改变事件和传输协议的情况下扩展。
+- V1 固件支持程序化 `face`、单张 PNG 和 PNG 序列帧。单张使用
+  `{ renderer: png, asset: assets/sprites/idle.png }`；序列使用
+  `{ renderer: png_sequence, frames: [...], frameMs: 400, animation: work }`。`frameMs` 范围为
+  120–10000 ms，单序列最多 16 帧。固件也支持非阻塞 tone/melody 与左右同步 RGB 定义；
+  WAV 资源格式仍为后续扩展预留。

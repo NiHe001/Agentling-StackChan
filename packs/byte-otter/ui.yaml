@@ -1,0 +1,108 @@
+canvas:
+  width: 320
+  height: 240
+
+usage_aliases:
+  five_hour:
+    source: codex
+    match: { duration_mins: 300 }
+  weekly:
+    source: codex
+    match: { duration_mins: 10080 }
+
+layouts:
+  base:
+    widgets:
+      - id: clock
+        widget: clock
+        bind: clock.local
+        visible: true
+        rect: { x: 8, y: 3, width: 58, height: 18 }
+        zIndex: 20
+        style: { foreground: "#FFF4DC", fontSize: 12 }
+
+      - id: agent
+        widget: agent_badge
+        bind: agent.source
+        visible: true
+        rect: { x: 70, y: 3, width: 58, height: 18 }
+        zIndex: 20
+        props: { label: CODEX }
+        style: { foreground: "#071712", background: "#63E6BE", fontSize: 9, radius: 4, align: center }
+
+      - id: task_count
+        widget: task_count
+        bind: agent.task_count
+        visible: true
+        rect: { x: 133, y: 3, width: 179, height: 18 }
+        zIndex: 20
+        style: { foreground: "#AFC8C4", fontSize: 8 }
+
+      - id: weather
+        widget: weather
+        bind: weather.current
+        visible: false
+        rect: { x: 205, y: 3, width: 107, height: 18 }
+        zIndex: 20
+        style: { foreground: "#D8E7E4", fontSize: 8, align: right }
+
+      - id: character
+        widget: sprite
+        bind: agent.expression
+        visible: true
+        rect: { x: 72, y: 20, width: 176, height: 177 }
+        zIndex: 1
+        props: { visual: png_sequence }
+
+      - id: status
+        widget: status_text
+        bind: agent.status
+        visible: true
+        rect: { x: 8, y: 191, width: 304, height: 23 }
+        zIndex: 30
+        style: { foreground: "#F8FFFD", background: "#173C38", fontSize: 12, radius: 7, align: center }
+
+      - id: quota_5h
+        widget: usage_bar
+        bind: usage.codex.five_hour
+        visible: true
+        rect: { x: 8, y: 218, width: 145, height: 18 }
+        zIndex: 30
+        props: { label: "5H", value_mode: remaining, show_percent: true, show_reset: false }
+        style: { foreground: "#F7EEE1", normal: "#63E6BE", low: "#FFB84D", critical: "#FF5D73", fontSize: 8 }
+
+      - id: quota_week
+        widget: usage_bar
+        bind: usage.codex.weekly
+        visible: true
+        rect: { x: 167, y: 218, width: 145, height: 18 }
+        zIndex: 30
+        props: { label: "7D", value_mode: remaining, show_percent: true, show_reset: false }
+        style: { foreground: "#F7EEE1", normal: "#63E6BE", low: "#FFB84D", critical: "#FF5D73", fontSize: 8 }
+
+  working:
+    extends: base
+    overrides:
+      status:
+        style: { background: "#123F49", foreground: "#EEFFFF" }
+
+  idle:
+    extends: base
+    overrides:
+      status:
+        style: { background: "#173C38", foreground: "#D9FFF4" }
+
+  waiting:
+    extends: base
+    overrides:
+      status:
+        style: { background: "#604414", foreground: "#FFF0C2" }
+
+  critical:
+    extends: base
+    overrides:
+      quota_5h: { visible: false }
+      quota_week: { visible: false }
+      status:
+        rect: { x: 8, y: 207, width: 304, height: 25 }
+        style: { background: "#72243A", foreground: "#FFFFFF", fontSize: 14 }

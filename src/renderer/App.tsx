@@ -84,6 +84,8 @@ export function App() {
             <span className="state-dot" />
             <div><strong>{stateLabel(snapshot.agent.aggregateState)}</strong><small>{snapshot.agent.tasks.length} 个任务</small></div>
           </div>
+          <PanelTitle title="任务动态" subtitle="最近 6 条" />
+          <TaskTimeline snapshot={snapshot} />
           <QuotaCard alias="five_hour" label="5 小时额度" snapshot={snapshot} />
           <QuotaCard alias="weekly" label="每周额度" snapshot={snapshot} />
 
@@ -137,5 +139,22 @@ function QuotaCard({ alias, label, snapshot }: { alias: string; label: string; s
 }
 
 function PanelTitle({ title, subtitle }: { title: string; subtitle: string }) { return <div className="panel-title"><h3>{title}</h3><span>{subtitle}</span></div>; }
+function TaskTimeline({ snapshot }: { snapshot: DesktopSnapshot }) {
+  const reports = snapshot.agent.reports.slice(0, 6);
+  if (reports.length === 0) return <div className="activity-empty">任务事件会显示在这里</div>;
+  return <div className="activity-list" aria-label="任务动态">
+    {reports.map((report) => <button
+      key={report.id}
+      className={report.taskId === snapshot.agent.activeTaskId ? "active" : ""}
+      onClick={() => void window.agentling.selectTask(report.taskId)}
+      title={`${report.taskTitle} · ${report.message}`}
+    >
+      <span className={`activity-dot state-${report.state}`} />
+      <span><strong>{report.taskTitle}</strong><small>{report.message}</small></span>
+      <time>{formatActivityTime(report.occurredAt)}</time>
+    </button>)}
+  </div>;
+}
 function stateLabel(state: string) { return ({ idle: "空闲", working: "正在工作", waiting_approval: "等待批准", needs_input: "需要输入", completed: "已完成", failed: "失败", offline: "离线" } as Record<string, string>)[state] || state; }
+function formatActivityTime(at: number) { return new Date(at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }); }
 function mergeWidget(widget: WidgetConfig, patch: Partial<WidgetConfig>): WidgetConfig { return { ...widget, ...patch, rect: patch.rect ? { ...widget.rect, ...patch.rect } : widget.rect, props: { ...widget.props, ...patch.props }, style: { ...widget.style, ...patch.style } }; }

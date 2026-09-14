@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { resolveLayout } from "../../core/layout";
 import type {
   DesktopSnapshot,
@@ -74,13 +74,9 @@ export function DevicePreview({ snapshot, ui, layoutName, selectedId, onSelect, 
             </div>
           ) : null,
         )}
-        {layoutName === "critical" && (
-          <div className="critical-overlay">
-            <span>{snapshot.agent.aggregateState === "waiting_approval" ? "等待批准" : "需要注意"}</span>
-          </div>
-        )}
+        {layoutName === "critical" && <div className="critical-frame" />}
       </div>
-      <div className="device-base">
+      <div className={`device-base lights-${snapshot.agent.aggregateState.replaceAll("_", "-")}`}>
         <div className="servo-neck" />
         <div className="base-leds">{Array.from({ length: 12 }, (_, index) => <i key={index} />)}</div>
       </div>
@@ -90,7 +86,7 @@ export function DevicePreview({ snapshot, ui, layoutName, selectedId, onSelect, 
 
 function Widget({ widget, snapshot }: { widget: WidgetConfig; snapshot: DesktopSnapshot }) {
   if (widget.widget === "sprite") {
-    return <Face state={snapshot.agent.aggregateState} scene={snapshot.overlay?.scene} />;
+    return <CharacterSprite snapshot={snapshot} />;
   }
   if (widget.widget === "clock") {
     return <strong>{new Date(snapshot.clock.iso).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}</strong>;
@@ -100,13 +96,15 @@ function Widget({ widget, snapshot }: { widget: WidgetConfig; snapshot: DesktopS
   }
   if (widget.widget === "status_text") {
     const task = snapshot.agent.tasks.find((entry) => entry.id === snapshot.agent.activeTaskId);
-    return <span className="ellipsis">{snapshot.overlay?.text || task?.message || stateLabel(snapshot.agent.aggregateState)}</span>;
+    return <span className="ellipsis">{statusText(snapshot, task)}</span>;
   }
   if (widget.widget === "task_count") {
-    return <span>{snapshot.agent.tasks.length} TASKS</span>;
+    const task = snapshot.agent.tasks.find((entry) => entry.id === snapshot.agent.activeTaskId);
+    const index = task ? snapshot.agent.tasks.findIndex((entry) => entry.id === task.id) + 1 : 0;
+    return <span className="ellipsis">{task?.title || "0 TASKS"}{snapshot.agent.tasks.length > 1 ? `  ${index}/${snapshot.agent.tasks.length}` : ""}</span>;
   }
   if (widget.widget === "agent_badge") {
-    return <span className="agent-badge">CODEX</span>;
+    return <span className="agent-badge">{String(widget.props?.label || "CODEX")}</span>;
   }
   if (widget.widget === "usage_bar" || widget.widget === "usage_text") {
     const window = usageWindow(widget.bind, snapshot);
@@ -129,6 +127,66 @@ function Widget({ widget, snapshot }: { widget: WidgetConfig; snapshot: DesktopS
     return <span>{progress.stage} {Math.round((progress.current / progress.total) * 100)}%</span>;
   }
   return <span>{String(widget.props?.text || widget.id)}</span>;
+}
+
+const assetCache = new Map<string, string>();
+
+function CharacterSprite({ snapshot }: { snapshot: DesktopSnapshot }) {
+  const scene = snapshot.overlay?.scene || stateVisual(snapshot.agent.aggregateState);
+  const visual = snapshot.pack?.visuals[scene];
+  const frames = visual?.renderer === "png_sequence" && Array.isArray(visual.frames)
+    ? visual.frames.filter((entry): entry is string => typeof entry === "string")
+    : visual?.renderer === "png" && typeof visual.asset === "string"
+      ? [visual.asset]
+      : [];
+  const frameMs = typeof visual?.frameMs === "number" ? visual.frameMs : 1_000;
+  const packIdentity = `${snapshot.pack?.manifest.id || "none"}@${snapshot.pack?.manifest.version || "0"}`;
+  const frameSignature = frames.join("|");
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [sources, setSources] = useState<string[]>([]);
+
+  useEffect(() => {
+    setFrameIndex(0);
+    if (frames.length < 2) return;
+    const timer = window.setInterval(() => setFrameIndex((current) => (current + 1) % frames.length), frameMs);
+    return () => window.clearInterval(timer);
+  }, [frameSignature, frameMs, frames.length]);
+
+  useEffect(() => {
+    let active = true;
+    if (frames.length === 0) {
+      setSources([]);
+      return () => { active = false; };
+    }
+    void Promise.all(frames.map(async (asset) => {
+      const cacheKey = `${packIdentity}:${asset}`;
+      const cached = assetCache.get(cacheKey);
+      if (cached) return cached;
+      const value = await window.agentling.getPackAsset(asset);
+      if (value) assetCache.set(cacheKey, value);
+      return value;
+    })).then((values) => {
+      if (active) setSources(values.filter((value): value is string => Boolean(value)));
+    });
+    return () => { active = false; };
+  }, [frameSignature, packIdentity]);
+  const source = sources[frameIndex % Math.max(1, sources.length)];
+  const animation = typeof visual?.animation === "string" ? visual.animation : "none";
+  if (source) return <img className={`character-sprite visual-${animation}`} src={source} alt="Byte Otter character state" />;
+  return <Face state={snapshot.agent.aggregateState} scene={snapshot.overlay?.scene} />;
+}
+
+function stateVisual(state: string): string {
+  return ({ idle: "idle", working: "working", waiting_approval: "waiting_approval", needs_input: "waiting", completed: "completed", failed: "failed", offline: "offline" } as Record<string, string>)[state] || state;
+}
+
+function statusText(snapshot: DesktopSnapshot, task?: DesktopSnapshot["agent"]["tasks"][number]): string {
+  if (snapshot.overlay?.text) return snapshot.overlay.text;
+  if (!task || task.state === "idle" || snapshot.agent.aggregateState === "offline") return stateLabel(task?.state || snapshot.agent.aggregateState);
+  const lifecycle = stateLabel(task.state);
+  if (!task.message) return lifecycle;
+  if (["waiting_approval", "needs_input", "failed"].includes(task.state) && !task.message.includes(lifecycle)) return `${lifecycle} · ${task.message}`;
+  return task.message;
 }
 
 function Face({ state, scene }: { state: string; scene?: string }) {

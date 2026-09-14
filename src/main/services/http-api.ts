@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AgentlingRuntime } from "../runtime";
 import type { HostConfig } from "../config";
-import { expressionRequestSchema, progressRequestSchema } from "../../core/schemas";
+import { expressionRequestSchema, progressRequestSchema, uiConfigSchema } from "../../core/schemas";
+import { z } from "zod";
+import { compilePack } from "../../core/pack";
 
 export class LocalApiServer {
   private server: Server | null = null;
@@ -36,8 +38,30 @@ export class LocalApiServer {
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return this.json(response, 200, this.runtime.snapshot());
       }
+      if (request.method === "GET" && url.pathname === "/v1/device/ports") return this.json(response, 200, await this.runtime.device.listPorts());
+      if (request.method === "GET" && url.pathname === "/v1/device/diagnostics") return this.json(response, 200, await this.runtime.device.diagnostics());
       if (request.method !== "POST") return this.json(response, 404, { error: "not found" });
       const body = await readJson(request);
+      if (url.pathname === "/v1/layout/save") {
+        const pack = await this.runtime.saveUi(uiConfigSchema.parse(body.ui));
+        return this.json(response, 200, { ui: pack.ui });
+      }
+      if (url.pathname === "/v1/device/connect") {
+        const { path } = z.object({ path: z.string().min(1) }).parse(body);
+        const ports = await this.runtime.device.listPorts();
+        if (!ports.some(port => port.path === path)) throw new Error("Not an available serial port");
+        return this.json(response, 200, await this.runtime.device.connect(path));
+      }
+      if (url.pathname === "/v1/device/disconnect") { await this.runtime.device.disconnect(); return this.json(response, 200, { ok: true }); }
+      if (url.pathname === "/v1/pack/validate" || url.pathname === "/v1/pack/load") {
+        const { directory } = z.object({ directory: z.string().min(1) }).parse(body);
+        const pack = url.pathname.endsWith("validate") ? await compilePack(directory) : await this.runtime.loadPack(directory);
+        return this.json(response, 200, { manifest: pack.manifest, files: pack.files, ui: pack.ui });
+      }
+      if (url.pathname === "/v1/pack/sync") {
+        await this.runtime.syncPack();
+        return this.json(response, 200, await this.runtime.device.diagnostics());
+      }
       if (url.pathname === "/v1/hook") {
         const event = this.runtime.handleHook(body);
         return this.json(response, 202, { accepted: Boolean(event), event });
@@ -65,6 +89,9 @@ export class LocalApiServer {
   }
 
   private authorized(request: IncomingMessage): boolean {
+    // This is a local native-client API, not a browser API. Prevent websites
+    // from issuing unauthenticated loopback device mutations.
+    if (request.headers.origin || request.headers["sec-fetch-site"]) return false;
     if (!this.config.token) return true;
     return request.headers.authorization === `Bearer ${this.config.token}`;
   }

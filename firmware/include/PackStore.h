@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <FS.h>
 #include <vector>
 
 namespace agentling {
@@ -21,14 +22,29 @@ public:
     bool loadRuntime(JsonDocument& target);
     const String& error() const { return error_; }
     bool available() const { return available_; }
+    bool sdAvailable() const { return sdAvailable_; }
+    bool usesSdCard() const { return activeStorageName_ == "microSD"; }
+    const String& storageName() const { return activeStorageName_; }
+    uint64_t totalBytes() const;
+    uint64_t usedBytes() const;
+    fs::FS& filesystem();
 
 private:
     bool safePath(const String& path) const;
-    bool ensureParentDirectories(const String& path);
-    bool verifyFile(const ExpectedFile& expected);
-    bool removeTree(const String& path);
+    bool ensureParentDirectories(fs::FS& storage, const String& path);
+    bool verifyFile(fs::FS& storage, const ExpectedFile& expected);
+    bool removeTree(fs::FS& storage, const String& path);
+    void closeTransactionFile();
 
     bool available_{false};
+    bool littleFsAvailable_{false};
+    bool sdAvailable_{false};
+    fs::FS* activeStorage_{nullptr};
+    fs::FS* transactionStorage_{nullptr};
+    File transactionFile_;
+    String transactionFilePath_;
+    size_t transactionFileOffset_{0};
+    String activeStorageName_{"none"};
     String transactionId_;
     String transactionVersion_;
     String error_;

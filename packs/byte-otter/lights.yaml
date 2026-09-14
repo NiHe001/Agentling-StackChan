@@ -1,0 +1,12 @@
+lights:
+  off: { mode: solid, color: "#000000", brightness: 0 }
+  night: { mode: breathe, color: "#173A43", brightness: 14, periodMs: 3600 }
+  mint_dim: { mode: solid, color: "#2A806D", brightness: 24 }
+  mint: { mode: solid, color: "#63E6BE", brightness: 42 }
+  idle_breathe: { mode: breathe, color: "#4BCFA9", brightness: 35, periodMs: 2800 }
+  think_breathe: { mode: breathe, color: "#55C7FF", brightness: 46, periodMs: 1800 }
+  mint_pulse: { mode: pulse, color: "#63E6BE", brightness: 55, periodMs: 900 }
+  work_flow: { mode: chase, color: "#49BFFF", brightness: 58, periodMs: 950 }
+  approval_pulse: { mode: pulse, color: "#FFB84D", brightness: 68, periodMs: 720 }
+  success_pulse: { mode: pulse, color: "#63E6BE", brightness: 70, periodMs: 620 }
+  error_pulse: { mode: pulse, color: "#FF5D73", brightness: 72, periodMs: 520 }

@@ -34,7 +34,7 @@ export interface HostConfig {
 export const DEFAULT_HOST_CONFIG: HostConfig = {
   desktop: { openAtLogin: false },
   server: { host: "127.0.0.1", port: 17_321 },
-  codex: { enabled: true, refreshMs: 5 * 60_000 },
+  codex: { enabled: true, refreshMs: 60_000 },
   weather: {
     enabled: false,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -46,10 +46,13 @@ export const DEFAULT_HOST_CONFIG: HostConfig = {
 export async function loadHostConfig(file: string): Promise<HostConfig> {
   try {
     const value = parse(await fs.readFile(file, "utf8")) as Partial<HostConfig>;
+    const codex = { ...DEFAULT_HOST_CONFIG.codex, ...value.codex };
+    // Migrate the original five-minute default while preserving deliberate custom values.
+    if (codex.refreshMs === 5 * 60_000) codex.refreshMs = DEFAULT_HOST_CONFIG.codex.refreshMs;
     return {
       desktop: { ...DEFAULT_HOST_CONFIG.desktop, ...value.desktop },
       server: { ...DEFAULT_HOST_CONFIG.server, ...value.server, host: "127.0.0.1" },
-      codex: { ...DEFAULT_HOST_CONFIG.codex, ...value.codex },
+      codex,
       weather: { ...DEFAULT_HOST_CONFIG.weather, ...value.weather },
       device: { ...DEFAULT_HOST_CONFIG.device, ...value.device },
       packDir: value.packDir,
@@ -60,4 +63,11 @@ export async function loadHostConfig(file: string): Promise<HostConfig> {
     await fs.writeFile(file, stringify(DEFAULT_HOST_CONFIG), "utf8");
     return structuredClone(DEFAULT_HOST_CONFIG);
   }
+}
+
+export async function saveHostConfig(file: string, config: HostConfig): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const temporary = `${file}.tmp`;
+  await fs.writeFile(temporary, stringify(config, { lineWidth: 100 }), "utf8");
+  await fs.rename(temporary, file);
 }

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from "electron";
 import path from "node:path";
 import { AgentlingRuntime } from "./runtime";
-import { loadHostConfig } from "./config";
+import { loadHostConfig, saveHostConfig } from "./config";
 import type { DesktopSnapshot, UiConfig } from "../core/types";
 
 let mainWindow: BrowserWindow | null = null;
@@ -78,7 +78,7 @@ function updateTray(snapshot: DesktopSnapshot): void {
 async function bootstrap(): Promise<void> {
   const configFile = path.join(app.getPath("userData"), "config.yaml");
   const config = await loadHostConfig(configFile);
-  const defaultPackDir = path.join(app.getAppPath(), "packs", "default");
+  const defaultPackDir = path.join(app.getAppPath(), "packs", "byte-otter");
   runtime = new AgentlingRuntime(config, defaultPackDir);
   runtime.on("snapshot", (snapshot: DesktopSnapshot) => {
     updateTray(snapshot);
@@ -87,18 +87,30 @@ async function bootstrap(): Promise<void> {
 
   ipcMain.handle("agentling:snapshot:get", () => runtime?.snapshot());
   ipcMain.handle("agentling:ports:list", () => runtime?.device.listPorts());
-  ipcMain.handle("agentling:device:connect", (_event, portPath: string) =>
-    runtime?.device.connect(portPath),
-  );
+  ipcMain.handle("agentling:device:connect", async (_event, portPath: string) => {
+    const status = await runtime?.device.connect(portPath);
+    if (runtime) {
+      runtime.config.device.preferredPath = portPath;
+      await saveHostConfig(configFile, runtime.config);
+    }
+    return status;
+  });
   ipcMain.handle("agentling:device:disconnect", () => runtime?.device.disconnect());
   ipcMain.handle("agentling:pack:open", async () => {
     const selected = await dialog.showOpenDialog({ properties: ["openDirectory"] });
     if (selected.canceled || !selected.filePaths[0]) return null;
-    return runtime?.loadPack(selected.filePaths[0]);
+    const pack = await runtime?.loadPack(selected.filePaths[0]);
+    if (runtime && pack) {
+      runtime.config.packDir = pack.sourceDir;
+      await saveHostConfig(configFile, runtime.config);
+    }
+    return pack;
   });
   ipcMain.handle("agentling:pack:save-ui", (_event, ui: UiConfig) => runtime?.saveUi(ui));
   ipcMain.handle("agentling:pack:sync", () => runtime?.syncPack());
+  ipcMain.handle("agentling:pack:asset", (_event, relativePath: string) => runtime?.readPackAsset(relativePath));
   ipcMain.handle("agentling:usage:refresh", () => runtime?.usageProvider.refresh());
+  ipcMain.handle("agentling:task:select", (_event, id: string) => runtime?.selectTask(id));
   ipcMain.handle("agentling:expression:show", (_event, value) => runtime?.showExpression(value));
   ipcMain.handle("agentling:expression:clear", () => runtime?.clearExpression());
 
@@ -106,6 +118,11 @@ async function bootstrap(): Promise<void> {
   tray = new Tray(trayImage());
   tray.on("click", () => (mainWindow?.isVisible() ? mainWindow.hide() : mainWindow?.show()));
   await runtime.start();
+  const activePackDir = runtime.snapshot().pack?.sourceDir;
+  if (activePackDir && config.packDir !== activePackDir) {
+    config.packDir = activePackDir;
+    await saveHostConfig(configFile, config);
+  }
   updateTray(runtime.snapshot());
   if (process.platform === "darwin" && app.isPackaged && config.desktop.openAtLogin) {
     app.setLoginItemSettings({ openAtLogin: true });

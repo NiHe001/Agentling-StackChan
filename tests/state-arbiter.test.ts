@@ -39,6 +39,15 @@ describe("StateArbiter", () => {
     arbiter.apply(event("turn.completed", "task", 1_000));
     arbiter.setOverlay({ scene: "happy", createdAt: 1_000, expiresAt: 2_000 });
     expect(arbiter.getOverlay(2_001)).toBeNull();
-    expect(arbiter.tick(11_001).tasks[0]?.state).toBe("idle");
+    expect(arbiter.tick(5_001).tasks[0]?.state).toBe("idle");
+  });
+
+  it("keeps a newest-first task report timeline with useful tool labels", () => {
+    const arbiter = new StateArbiter();
+    arbiter.apply({ ...event("turn.started", "task", 1_000), title: "角色包升级" });
+    arbiter.apply({ ...event("tool.started", "task", 2_000, 2), title: "角色包升级", tool: "exec_command" });
+    const snapshot = arbiter.snapshot(2_001);
+    expect(snapshot.tasks[0]).toMatchObject({ title: "角色包升级", message: "终端命令进行中", currentTool: "exec_command" });
+    expect(snapshot.reports.slice(0, 2).map((report) => report.message)).toEqual(["终端命令进行中", "开始处理"]);
   });
 });

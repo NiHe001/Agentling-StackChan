@@ -45,13 +45,13 @@ export class CodexHookAdapter extends EventEmitter implements AgentAdapter {
     if (!type) return null;
     const sessionId =
       stringValue(raw.session_id) || stringValue(raw.sessionId) || this.fallbackSessionId(raw);
-    const occurredAt = numberValue(raw.timestamp) || receivedAt;
+    const occurredAt = timestampValue(raw.timestamp) || receivedAt;
     const event: CanonicalEvent = {
       id:
         stringValue(raw.event_id) ||
         createHash("sha256")
           .update(
-            `${sessionId}:${hookName}:${occurredAt}:${stringValue(raw.tool_use_id) || ""}:${numberValue(raw.sequence) ?? ""}`,
+            `${sessionId}:${hookName}:${occurredAt}:${stringValue(raw.tool_use_id) || ""}:${sequenceValue(raw.sequence) ?? ""}`,
           )
           .digest("hex")
           .slice(0, 24),
@@ -59,7 +59,7 @@ export class CodexHookAdapter extends EventEmitter implements AgentAdapter {
       type,
       sessionId,
       occurredAt,
-      sequence: numberValue(raw.sequence),
+      sequence: sequenceValue(raw.sequence),
       title: stringValue(raw.title),
       cwd: stringValue(raw.cwd),
       tool: stringValue(raw.tool_name) || stringValue(raw.toolName),
@@ -93,14 +93,25 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function numberValue(value: unknown): number | undefined {
+function timestampValue(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   // Accept seconds as well as milliseconds.
   return value < 10_000_000_000 ? value * 1_000 : value;
 }
 
+function sequenceValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 function safeMessage(raw: RawHook): string | undefined {
-  // Never forward prompts, command output, tool input, or transcript paths.
-  const candidate = stringValue(raw.status_message) || stringValue(raw.notification_type);
-  return candidate?.slice(0, 80);
+  // Forward only a short user-facing report. Never forward prompts, command
+  // output, tool input, transcript paths, or arbitrary nested payloads.
+  const candidate =
+    stringValue(raw.status_message) ||
+    stringValue(raw.message) ||
+    stringValue(raw.last_assistant_message) ||
+    stringValue(raw.notification_type);
+  if (!candidate) return undefined;
+  const oneLine = candidate.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return [...oneLine].slice(0, 96).join("");
 }

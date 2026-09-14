@@ -1,5 +1,7 @@
 #include "AgentlingApp.h"
 
+#include <LittleFS.h>
+#include <SD.h>
 #include <cmath>
 #include <cstring>
 
@@ -38,7 +40,10 @@ void AgentlingApp::begin() {
     config.clear_display = true;
     config.output_power = true;
     M5StackChan.begin();
-    M5StackChan.Motion.setAutoTorqueReleaseEnabled(true);
+    // This release keeps the head still: the BSP enables the servo rail while
+    // booting, so disable both torque and power immediately after begin().
+    M5StackChan.Motion.setTorqueEnabled(false);
+    M5StackChan.setServoPowerEnabled(false);
     // Build every frame away from the LCD, then transfer it in one operation.
     // CoreS3 has PSRAM and M5Canvas uses it by default, so a 320x240 RGB565
     // frame does not consume the small internal heap.
@@ -70,15 +75,15 @@ void AgentlingApp::update() {
         });
     });
     updateBehavior();
+    updateSound();
+    updateLight();
+    updateVisual();
     updateTouch();
     updateIdle();
-    if (torqueReleaseAt_ && static_cast<int32_t>(millis() - torqueReleaseAt_) >= 0) {
-        M5StackChan.Motion.setTorqueEnabled(false);
-        torqueReleaseAt_ = 0;
-    }
     if (hostOnline_ && millis() - lastHostMessageAt_ > 15'000) {
         hostOnline_ = false;
         state_ = "offline";
+        statusMessage_ = stateLabel(state_);
         renderDirty_ = true;
     }
     if (renderDirty_ && millis() - lastRenderAt_ >= 16) render();
@@ -96,8 +101,7 @@ void AgentlingApp::handleEnvelope(const EnvelopeView& envelope) {
     CborReader payload(envelope.payload);
     if (envelope.type == "device.hello") sendHello();
     else if (envelope.type == "agent.snapshot") {
-        parseAgentSnapshot(payload);
-        renderDirty_ = true;
+        if (parseAgentSnapshot(payload)) renderDirty_ = true;
     } else if (envelope.type == "widget.snapshot") {
         parseWidgetSnapshot(payload);
         renderDirty_ = true;
@@ -113,41 +117,72 @@ void AgentlingApp::handleEnvelope(const EnvelopeView& envelope) {
     }
 }
 
-void AgentlingApp::parseAgentSnapshot(CborReader& reader) {
+bool AgentlingApp::parseAgentSnapshot(CborReader& reader) {
+    const String previousState = state_;
+    const String previousActiveTaskId = activeTaskId_;
+    const String previousActiveTaskTitle = activeTaskTitle_;
+    const String previousActiveTaskReport = activeTaskReport_;
+    const String previousStatusMessage = statusMessage_;
+    const size_t previousTaskCount = taskCount_;
     size_t fields;
-    if (!reader.readMapSize(fields)) return;
+    if (!reader.readMapSize(fields)) return false;
     taskCount_ = 0;
     for (size_t index = 0; index < fields; ++index) {
         String key;
-        if (!reader.readText(key)) return;
+        if (!reader.readText(key)) return false;
         if (key == "tasks") {
             size_t count;
-            if (!reader.readArraySize(count)) return;
+            if (!reader.readArraySize(count)) return false;
             for (size_t taskIndex = 0; taskIndex < count; ++taskIndex) {
                 size_t taskFields;
-                if (!reader.readMapSize(taskFields)) return;
+                if (!reader.readMapSize(taskFields)) return false;
                 TaskValue task;
                 for (size_t field = 0; field < taskFields; ++field) {
                     String taskKey;
-                    if (!reader.readText(taskKey)) return;
+                    if (!reader.readText(taskKey)) return false;
                     if (taskKey == "id") reader.readText(task.id);
                     else if (taskKey == "title") reader.readText(task.title);
-                    else if (!reader.skipValue()) return;
+                    else if (taskKey == "state") reader.readText(task.state);
+                    else if (taskKey == "currentTool") task.currentTool = readTextOrEmpty(reader);
+                    else if (taskKey == "message") task.message = readTextOrEmpty(reader);
+                    else if (taskKey == "subagents") {
+                        uint64_t value = 0;
+                        if (!reader.readUnsigned(value)) return false;
+                        task.subagents = static_cast<uint8_t>(value > 255 ? 255 : value);
+                    } else if (!reader.skipValue()) return false;
                 }
                 if (taskCount_ < tasks_.size()) tasks_[taskCount_++] = task;
             }
         } else if (key == "activeTaskId") activeTaskId_ = readTextOrEmpty(reader);
         else if (key == "aggregateState") reader.readText(state_);
-        else if (!reader.skipValue()) return;
+        else if (!reader.skipValue()) return false;
     }
     activeTaskTitle_ = "";
+    activeTaskReport_ = "";
     for (size_t index = 0; index < taskCount_; ++index) {
-        if (tasks_[index].id == activeTaskId_) activeTaskTitle_ = tasks_[index].title;
+        if (tasks_[index].id == activeTaskId_) {
+            activeTaskTitle_ = tasks_[index].title;
+            activeTaskReport_ = tasks_[index].message;
+        }
     }
-    statusMessage_ = activeTaskTitle_.isEmpty() ? stateLabel(state_) : activeTaskTitle_;
+    // The header identifies the selected task; the status row reports what it
+    // just did. Critical lifecycle truth always remains explicit.
+    const String lifecycle = stateLabel(state_);
+    if (state_ == "idle" || state_ == "offline") statusMessage_ = lifecycle;
+    else if (activeTaskReport_.isEmpty()) statusMessage_ = lifecycle;
+    else if ((state_ == "waiting_approval" || state_ == "needs_input" || state_ == "failed") &&
+             activeTaskReport_.indexOf(lifecycle) < 0) {
+        statusMessage_ = lifecycle + " · " + activeTaskReport_;
+    } else statusMessage_ = activeTaskReport_;
     if (state_ == "idle") {
         if (!idleStartedAt_) idleStartedAt_ = millis();
     } else idleStartedAt_ = 0;
+    return previousState != state_ ||
+        previousActiveTaskId != activeTaskId_ ||
+        previousActiveTaskTitle != activeTaskTitle_ ||
+        previousActiveTaskReport != activeTaskReport_ ||
+        previousStatusMessage != statusMessage_ ||
+        previousTaskCount != taskCount_;
 }
 
 void AgentlingApp::parseWidgetSnapshot(CborReader& reader) {
@@ -253,7 +288,11 @@ void AgentlingApp::parseActionCue(CborReader& reader) {
                 for (size_t field = 0; field < overlayFields; ++field) {
                     String overlayKey;
                     reader.readText(overlayKey);
-                    if (overlayKey == "scene") reader.readText(expression_);
+                    if (overlayKey == "scene") {
+                        String scene;
+                        reader.readText(scene);
+                        setExpression(scene);
+                    }
                     else if (overlayKey == "text") overlayText_ = readTextOrEmpty(reader);
                     else reader.skipValue();
                 }
@@ -261,7 +300,7 @@ void AgentlingApp::parseActionCue(CborReader& reader) {
         } else if (!reader.skipValue()) return;
     }
     if (!behavior.isEmpty()) startBehavior(behavior);
-    if (overlaySeen && overlayText_.isEmpty() && state_ == "idle") expression_ = "resting";
+    if (overlaySeen && overlayText_.isEmpty()) setExpression(expressionForState());
 }
 
 void AgentlingApp::parsePackManifest(CborReader& reader) {
@@ -335,12 +374,34 @@ void AgentlingApp::parsePackCommit(CborReader& reader) {
     pack_.clear();
     hasPack_ = packStore_.loadRuntime(pack_);
     startBehavior("wake");
+    if (!hasPack_) sendError(packStore_.error());
 }
 
 void AgentlingApp::sendHello() {
-    protocol_.send(Serial, "device.hello", [](CborWriter& writer) {
-        writer.map(3);
-        writer.key("firmwareVersion"); writer.text("0.1.0");
+    protocol_.send(Serial, "device.hello", [this](CborWriter& writer) {
+        writer.map(4);
+        writer.key("diagnostics"); writer.map(20);
+        writer.key("visualCount"); writer.unsignedInteger(pack_["visuals"].size());
+        writer.key("visualRenderer"); writer.text(pack_["visuals"][expression_]["renderer"] | "missing");
+        writer.key("visualFrame"); writer.unsignedInteger(visualFrameIndex_);
+        writer.key("widgetCount"); writer.unsignedInteger(pack_["ui"]["layouts"]["base"]["widgets"].size());
+        writer.key("packLoaded"); writer.boolean(hasPack_);
+        writer.key("packId"); writer.text(pack_["manifest"]["id"] | "");
+        writer.key("packVersion"); writer.text(pack_["manifest"]["version"] | "");
+        writer.key("storageBackend"); writer.text(packStore_.storageName());
+        writer.key("sdMounted"); writer.boolean(packStore_.sdAvailable());
+        writer.key("storageTotal"); writer.unsignedInteger(packStore_.totalBytes());
+        writer.key("storageUsed"); writer.unsignedInteger(packStore_.usedBytes());
+        writer.key("packError"); writer.text(packStore_.error());
+        writer.key("expression"); writer.text(expression_);
+        writer.key("renderedAsset"); writer.text(renderedAsset_);
+        writer.key("renderError"); writer.text(renderError_);
+        writer.key("state"); writer.text(state_);
+        writer.key("statusMessage"); writer.text(statusMessage_);
+        writer.key("activeTaskTitle"); writer.text(activeTaskTitle_);
+        writer.key("activeTaskReport"); writer.text(activeTaskReport_);
+        writer.key("localTime"); writer.text(localTime_);
+        writer.key("firmwareVersion"); writer.text("0.3.0");
         writer.key("protocolVersion"); writer.unsignedInteger(AGENTLING_PROTOCOL_VERSION);
         writer.key("capabilities");
         writer.map(5);
@@ -349,11 +410,11 @@ void AgentlingApp::sendHello() {
         writer.key("height"); writer.unsignedInteger(240);
         writer.key("touch"); writer.boolean(true);
         writer.key("servo"); writer.map(2);
-        writer.key("yaw"); writer.boolean(true);
-        writer.key("pitch"); writer.boolean(true);
+        writer.key("yaw"); writer.boolean(false);
+        writer.key("pitch"); writer.boolean(false);
         writer.key("speaker"); writer.boolean(true);
         writer.key("rgbCount"); writer.unsignedInteger(12);
-        writer.key("sdCard"); writer.boolean(true);
+        writer.key("sdCard"); writer.boolean(packStore_.sdAvailable());
     });
 }
 
@@ -383,6 +444,18 @@ String AgentlingApp::sceneForState() const {
     if (state_ == "working") return "working";
     if (state_ == "idle") return "idle";
     return "base";
+}
+
+String AgentlingApp::expressionForState() const {
+    auto available = [this](const char* name) { return !pack_["visuals"][name].isNull(); };
+    if (state_ == "working") return available("working") ? "working" : "focused";
+    if (state_ == "waiting_approval" || state_ == "needs_input") {
+        return available("waiting_approval") ? "waiting_approval" : "alert";
+    }
+    if (state_ == "completed") return available("completed") ? "completed" : "happy";
+    if (state_ == "failed") return available("failed") ? "failed" : "worried";
+    if (state_ == "offline") return available("offline") ? "offline" : "sleeping";
+    return available("idle") ? "idle" : "resting";
 }
 
 void AgentlingApp::render() {
@@ -438,27 +511,76 @@ void AgentlingApp::renderWidget(JsonObjectConst widget, JsonObjectConst override
         display.fillRoundRect(x, y, width, height, valueOr(overrideStyle, style, "radius", 0), display.color565(bg >> 16, bg >> 8, bg));
     }
     display.setTextColor(display.color565(fg >> 16, fg >> 8, fg), display.color565(bg >> 16, bg >> 8, bg));
-    display.setTextSize(fontSize >= 16 ? 2 : 1);
-    display.setTextDatum(middle_left);
+    if (fontSize >= 16) display.setFont(&fonts::efontCN_16);
+    else if (fontSize >= 12) display.setFont(&fonts::efontCN_12);
+    else display.setFont(&fonts::efontCN_10);
+    display.setTextSize(1);
+    const char* alignment = textOr(overrideStyle, style, "align", "left");
+    int textX = x + 3;
+    if (strcmp(alignment, "center") == 0) {
+        display.setTextDatum(middle_center);
+        textX = x + width / 2;
+    } else if (strcmp(alignment, "right") == 0) {
+        display.setTextDatum(middle_right);
+        textX = x + width - 3;
+    } else display.setTextDatum(middle_left);
     String type = widget["widget"] | "";
+    JsonObjectConst props = widget["props"].as<JsonObjectConst>();
     if (type == "sprite") renderFace(x, y, width, height);
-    else if (type == "clock") display.drawString(localTime_, x + 3, y + height / 2);
+    else if (type == "clock") display.drawString(localTime_, textX, y + height / 2);
     else if (type == "weather") {
         String value = isnan(temperatureC_) ? "天气 --" : String(static_cast<int>(round(temperatureC_))) + "° " + weatherLabel_;
-        display.drawString(value, x + 3, y + height / 2);
-    } else if (type == "agent_badge") display.drawString("CODEX", x + 3, y + height / 2);
-    else if (type == "task_count") display.drawString(String(taskCount_) + " TASKS", x + 3, y + height / 2);
-    else if (type == "status_text") display.drawString(overlayText_.isEmpty() ? statusMessage_ : overlayText_, x + 4, y + height / 2);
+        display.drawString(value, textX, y + height / 2);
+    } else if (type == "agent_badge") display.drawString(props["label"] | "CODEX", textX, y + height / 2);
+    else if (type == "task_count") {
+        String value = taskCount_ ? activeTaskTitle_ : "0 TASKS";
+        if (taskCount_ && taskCount_ > 1) {
+            size_t activeIndex = 0;
+            for (size_t index = 0; index < taskCount_; ++index) {
+                if (tasks_[index].id == activeTaskId_) activeIndex = index;
+            }
+            value += "  " + String(activeIndex + 1) + "/" + String(taskCount_);
+        }
+        display.drawString(value, textX, y + height / 2);
+    }
+    else if (type == "status_text") display.drawString(overlayText_.isEmpty() ? statusMessage_ : overlayText_, textX, y + height / 2);
     else if (type == "usage_bar" || type == "usage_text") {
         String bind = widget["bind"] | "";
         String alias = bind.substring(bind.lastIndexOf('.') + 1);
-        JsonObjectConst props = widget["props"].as<JsonObjectConst>();
         String label = props["label"] | alias;
         renderUsage(x, y, width, height, label, quotaForAlias(alias), style);
     }
 }
 
 void AgentlingApp::renderFace(int x, int y, int width, int height) {
+    renderedAsset_ = "";
+    renderError_ = "procedural fallback";
+    if (hasPack_) {
+        JsonObjectConst visual = pack_["visuals"][expression_].as<JsonObjectConst>();
+        const char* renderer = visual["renderer"] | "face";
+        // `| nullptr` selects ArduinoJson's nullptr_t overload and always
+        // returns null, even when the JSON contains a valid asset string.
+        const char* asset = visual["asset"].as<const char*>();
+        if (strcmp(renderer, "png_sequence") == 0) {
+            JsonArrayConst frames = visual["frames"].as<JsonArrayConst>();
+            if (!frames.isNull() && frames.size()) {
+                asset = frames[visualFrameIndex_ % frames.size()].as<const char*>();
+            }
+        }
+        renderError_ = String("renderer=") + renderer + ";asset=" + (asset ? asset : "null");
+        if ((strcmp(renderer, "png") == 0 || strcmp(renderer, "png_sequence") == 0) && asset && asset[0] != '\0') {
+            String path = String("/agentling/") + asset;
+            bool rendered = packStore_.usesSdCard()
+                ? SD.exists(path) && renderTarget().drawPngFile(SD, path.c_str(), x + visualOffsetX_, y + visualOffsetY_, width, height)
+                : LittleFS.exists(path) && renderTarget().drawPngFile(LittleFS, path.c_str(), x + visualOffsetX_, y + visualOffsetY_, width, height);
+            if (rendered) {
+                renderedAsset_ = asset;
+                renderError_ = "";
+                return;
+            }
+            renderError_ = String("PNG missing or decode failed: ") + asset;
+        }
+    }
     LovyanGFX& display = renderTarget();
     uint16_t white = display.color565(238, 247, 255);
     uint16_t pink = display.color565(241, 99, 132);
@@ -499,6 +621,7 @@ void AgentlingApp::renderUsage(int x, int y, int width, int height, const String
 void AgentlingApp::renderFallback() {
     renderFace(28, 32, 264, 150);
     renderTarget().setTextColor(TFT_WHITE, 0x0841);
+    renderTarget().setFont(&fonts::efontCN_16);
     renderTarget().setTextDatum(middle_center);
     renderTarget().drawString(overlayText_.isEmpty() ? stateLabel(state_) : overlayText_, 160, 202);
     renderUsage(8, 218, 145, 18, "5H", quotaForAlias("five_hour"), JsonObjectConst());
@@ -546,7 +669,7 @@ void AgentlingApp::updateBehavior() {
 }
 
 void AgentlingApp::applyBehaviorStep(JsonObjectConst step) {
-    if (step["expression"].is<const char*>()) expression_ = step["expression"].as<const char*>();
+    if (step["expression"].is<const char*>()) setExpression(step["expression"].as<const char*>());
     if (step["text"].is<const char*>()) overlayText_ = step["text"].as<const char*>();
     if (step["motion"].is<const char*>()) applyMotion(step["motion"].as<const char*>());
     if (step["sound"].is<const char*>()) applySound(step["sound"].as<const char*>());
@@ -554,40 +677,123 @@ void AgentlingApp::applyBehaviorStep(JsonObjectConst step) {
     renderDirty_ = true;
 }
 
+void AgentlingApp::setExpression(const String& name) {
+    if (name.isEmpty() || expression_ == name) return;
+    expression_ = name;
+    visualFrameIndex_ = 0;
+    visualStartedAt_ = millis();
+    visualOffsetX_ = 0;
+    visualOffsetY_ = 0;
+    renderDirty_ = true;
+}
+
 void AgentlingApp::applyMotion(const String& name) {
-    JsonObjectConst motion = pack_["motions"][name].as<JsonObjectConst>();
-    if (motion.isNull()) return;
-    int yaw = constrain(motion["yaw"] | 0, -900, 900);
-    int pitch = constrain(motion["pitch"] | 0, -450, 450);
-    int speed = constrain(motion["speed"] | 350, 1, 1000);
-    M5StackChan.setServoPowerEnabled(true);
-    M5StackChan.Motion.setTorqueEnabled(true);
-    M5StackChan.Motion.move(yaw, pitch, speed);
-    bool release = motion["releaseTorque"] | false;
-    uint32_t hold = static_cast<uint32_t>(constrain(motion["holdMs"] | 500, 0, 30000));
-    // A hard three-second ceiling prevents a malformed pack from holding torque forever.
-    torqueReleaseAt_ = millis() + (release ? min<uint32_t>(hold, 3000) : 3000);
+    // Deliberate no-op for firmware 0.2.x. Keep the method and pack field so a
+    // later opt-in motion release does not require a protocol change.
+    (void)name;
+    M5StackChan.Motion.setTorqueEnabled(false);
+    M5StackChan.setServoPowerEnabled(false);
 }
 
 void AgentlingApp::applySound(const String& name) {
     JsonObjectConst sound = pack_["sounds"][name].as<JsonObjectConst>();
     if (sound.isNull()) return;
-    int frequency = sound["frequency"] | 0;
-    if (!frequency && sound["notes"].is<JsonArrayConst>()) frequency = sound["notes"][0] | 0;
-    int duration = sound["durationMs"] | 0;
-    if (!duration) duration = sound["noteMs"] | 90;
-    if (frequency > 0) M5.Speaker.tone(frequency, duration);
+    melodyCount_ = 0;
+    melodyIndex_ = 0;
+    if (sound["notes"].is<JsonArrayConst>()) {
+        for (JsonVariantConst note : sound["notes"].as<JsonArrayConst>()) {
+            if (melodyCount_ >= melodyNotes_.size()) break;
+            melodyNotes_[melodyCount_++] = static_cast<uint16_t>(constrain(note.as<int>(), 0, 4000));
+        }
+    } else {
+        int frequency = constrain(sound["frequency"] | 0, 0, 4000);
+        if (frequency > 0) melodyNotes_[melodyCount_++] = static_cast<uint16_t>(frequency);
+    }
+    melodyNoteMs_ = static_cast<uint16_t>(constrain(sound["durationMs"] | (sound["noteMs"] | 90), 20, 1000));
+    float volume = constrain(sound["volume"] | 0.3f, 0.0f, 1.0f);
+    M5.Speaker.setVolume(static_cast<uint8_t>(round(volume * 255.0f)));
+    melodyNextAt_ = millis();
+    updateSound();
+}
+
+void AgentlingApp::updateSound() {
+    if (melodyIndex_ >= melodyCount_ || static_cast<int32_t>(millis() - melodyNextAt_) < 0) return;
+    uint16_t note = melodyNotes_[melodyIndex_++];
+    if (note > 0) M5.Speaker.tone(note, melodyNoteMs_);
+    melodyNextAt_ = millis() + melodyNoteMs_ + 18;
 }
 
 void AgentlingApp::applyLight(const String& name) {
     JsonObjectConst light = pack_["lights"][name].as<JsonObjectConst>();
     if (light.isNull()) return;
-    uint32_t color = parseColor(light["color"] | "#000000", 0);
-    int brightness = constrain(light["brightness"] | 50, 0, 100);
-    uint8_t red = static_cast<uint8_t>(((color >> 16) & 0xff) * brightness / 100);
-    uint8_t green = static_cast<uint8_t>(((color >> 8) & 0xff) * brightness / 100);
-    uint8_t blue = static_cast<uint8_t>((color & 0xff) * brightness / 100);
-    M5StackChan.showRgbColor(red, green, blue);
+    lightColor_ = parseColor(light["color"] | "#000000", 0);
+    lightBrightness_ = static_cast<uint8_t>(constrain(light["brightness"] | 50, 0, 100));
+    lightMode_ = light["mode"] | "solid";
+    lightPeriodMs_ = static_cast<uint32_t>(constrain(light["periodMs"] | 1000, 200, 10000));
+    lightStartedAt_ = millis();
+    lastLightUpdateAt_ = 0;
+    updateLight();
+}
+
+void AgentlingApp::updateLight() {
+    uint32_t now = millis();
+    if (lightMode_ == "solid" && lastLightUpdateAt_) return;
+    if (lastLightUpdateAt_ && now - lastLightUpdateAt_ < 50) return;
+    lastLightUpdateAt_ = now;
+    float phase = lightPeriodMs_
+        ? static_cast<float>((now - lightStartedAt_) % lightPeriodMs_) / lightPeriodMs_
+        : 0.0f;
+    float level = 1.0f;
+    if (lightMode_ == "breathe") {
+        level = 0.2f + 0.8f * (0.5f - 0.5f * cosf(phase * 2.0f * PI));
+    } else if (lightMode_ == "pulse") {
+        level = 0.25f + 0.75f * (0.5f - 0.5f * cosf(phase * 2.0f * PI));
+    }
+    uint8_t red = static_cast<uint8_t>(((lightColor_ >> 16) & 0xff) * lightBrightness_ * level / 100.0f);
+    uint8_t green = static_cast<uint8_t>(((lightColor_ >> 8) & 0xff) * lightBrightness_ * level / 100.0f);
+    uint8_t blue = static_cast<uint8_t>((lightColor_ & 0xff) * lightBrightness_ * level / 100.0f);
+    int activePair = static_cast<int>(phase * 6.0f) % 6;
+    for (int index = 0; index < 6; ++index) {
+        float pairLevel = lightMode_ == "chase" && index != activePair ? 0.12f : 1.0f;
+        uint8_t pairRed = static_cast<uint8_t>(red * pairLevel);
+        uint8_t pairGreen = static_cast<uint8_t>(green * pairLevel);
+        uint8_t pairBlue = static_cast<uint8_t>(blue * pairLevel);
+        // 0..5 and 6..11 are left/right. Pair first, then issue one shared
+        // refresh so both sides always advance in the same phase.
+        M5StackChan.setRgbColor(index, pairRed, pairGreen, pairBlue);
+        M5StackChan.setRgbColor(index + 6, pairRed, pairGreen, pairBlue);
+    }
+    M5StackChan.refreshRgb();
+}
+
+void AgentlingApp::updateVisual() {
+    if (!hasPack_ || millis() - lastVisualUpdateAt_ < 80) return;
+    lastVisualUpdateAt_ = millis();
+    JsonObjectConst visual = pack_["visuals"][expression_].as<JsonObjectConst>();
+    if (visual.isNull()) return;
+    size_t nextFrame = 0;
+    JsonArrayConst frames = visual["frames"].as<JsonArrayConst>();
+    if (!frames.isNull() && frames.size()) {
+        uint32_t frameMs = static_cast<uint32_t>(constrain(visual["frameMs"] | 1000, 120, 10000));
+        nextFrame = ((millis() - visualStartedAt_) / frameMs) % frames.size();
+    }
+    const char* animation = visual["animation"] | "none";
+    uint32_t elapsed = millis() - visualStartedAt_;
+    int nextX = 0;
+    int nextY = 0;
+    if (strcmp(animation, "breathe") == 0) nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 2800.0f) * 2.0f));
+    else if (strcmp(animation, "breathe_slow") == 0) nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 4200.0f) * 2.0f));
+    else if (strcmp(animation, "float") == 0) nextY = static_cast<int>(roundf(sinf(elapsed * 2.0f * PI / 1800.0f) * 3.0f));
+    else if (strcmp(animation, "work") == 0) nextY = (elapsed / 180) % 2 ? -2 : 0;
+    else if (strcmp(animation, "alert") == 0) nextY = (elapsed / 300) % 2 ? -2 : 0;
+    else if (strcmp(animation, "celebrate") == 0) nextY = (elapsed / 160) % 2 ? -4 : 0;
+    else if (strcmp(animation, "shake") == 0) nextX = static_cast<int>((elapsed / 120) % 3) - 1;
+    if (nextFrame != visualFrameIndex_ || nextX != visualOffsetX_ || nextY != visualOffsetY_) {
+        visualFrameIndex_ = nextFrame;
+        visualOffsetX_ = nextX;
+        visualOffsetY_ = nextY;
+        renderDirty_ = true;
+    }
 }
 
 void AgentlingApp::updateTouch() {
@@ -611,7 +817,7 @@ void AgentlingApp::updateIdle() {
     uint32_t idleFor = millis() - idleStartedAt_;
     if (idleFor > 180'000 && millis() - lastIdleEventAt_ > 30'000) {
         lastIdleEventAt_ = millis();
-        expression_ = "blink";
+        setExpression("blink");
         statusMessage_ = idleFor > 600'000 ? "休息一下，额度也在慢慢恢复" : "等待新任务";
         renderDirty_ = true;
     }

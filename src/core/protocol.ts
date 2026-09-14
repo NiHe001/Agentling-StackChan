@@ -100,8 +100,11 @@ export class DeviceFrameDecoder {
     for (const byte of chunk) {
       if (byte === 0) {
         if (this.buffered.length > 0) {
-          messages.push(decodeEnvelope(Uint8Array.from(this.buffered)));
+          // Clear before decoding so one corrupt USB frame cannot poison every
+          // later frame until the serial port is reconnected.
+          const frame = Uint8Array.from(this.buffered);
           this.buffered = [];
+          messages.push(decodeEnvelope(frame));
         }
       } else {
         if (this.buffered.length >= 256 * 1024) {

@@ -1,0 +1,86 @@
+behaviors:
+  wake:
+    cooldownMs: 1200
+    steps:
+      - { at: 0, expression: sleeping, light: night }
+      - { at: 240, expression: connecting, light: mint_pulse }
+      - { at: 850, expression: awake, light: mint, sound: startup }
+      - { at: 1450, expression: idle, light: idle_breathe }
+
+  rest:
+    loop: true
+    cooldownMs: 800
+    steps:
+      - { at: 0, expression: idle, light: idle_breathe }
+      - { at: 4700, expression: blink }
+      - { at: 5250, expression: resting }
+      - { at: 9700, expression: curious, light: mint_dim }
+      - { at: 11200, expression: idle, light: idle_breathe }
+
+  sleep:
+    steps:
+      - { at: 0, expression: offline, light: night }
+
+  focus:
+    loop: true
+    cooldownMs: 600
+    steps:
+      - { at: 0, expression: working, light: work_flow }
+      - { at: 2600, expression: thinking, light: think_breathe }
+      - { at: 3900, expression: coding, light: work_flow }
+
+  tool_focus:
+    cooldownMs: 450
+    steps:
+      - { at: 0, expression: focused, light: work_flow }
+      - { at: 350, expression: coding, light: work_flow, sound: working }
+      - { at: 1050, expression: working }
+
+  acknowledge:
+    cooldownMs: 700
+    steps:
+      - { at: 0, expression: success, light: mint_pulse }
+      - { at: 700, expression: working, light: work_flow }
+
+  celebrate:
+    cooldownMs: 2400
+    steps:
+      - { at: 0, expression: complete, sound: complete, light: success_pulse }
+      - { at: 1550, expression: completed, light: mint }
+
+  worried:
+    cooldownMs: 2200
+    steps:
+      - { at: 0, expression: failed, sound: error, light: error_pulse }
+      - { at: 1600, expression: worried, light: error_pulse }
+
+  attention:
+    loop: true
+    cooldownMs: 1800
+    steps:
+      - { at: 0, expression: waiting_approval, sound: approval, light: approval_pulse }
+      - { at: 2400, expression: waiting, light: approval_pulse }
+
+  curious:
+    cooldownMs: 1200
+    steps:
+      - { at: 0, expression: curious, light: think_breathe }
+      - { at: 1300, expression: working, light: work_flow }
+
+  quota_low:
+    cooldownMs: 60000
+    steps:
+      - { at: 0, expression: quota, sound: quota, light: approval_pulse }
+      - { at: 1800, expression: idle, light: idle_breathe }
+
+  quota_critical:
+    cooldownMs: 60000
+    steps:
+      - { at: 0, expression: quota_critical, sound: approval, light: error_pulse }
+      - { at: 1800, expression: quota, light: approval_pulse }
+
+  quota_exhausted:
+    cooldownMs: 60000
+    steps:
+      - { at: 0, expression: failed, sound: error, light: error_pulse }
+      - { at: 1600, expression: sleeping, light: night }

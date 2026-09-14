@@ -4,6 +4,7 @@ import type {
   AgentState,
   CanonicalEvent,
   ExpressionOverlay,
+  TaskReport,
   TaskSnapshot,
 } from "./types";
 
@@ -33,6 +34,7 @@ const EVENT_STATE: Partial<Record<CanonicalEvent["type"], AgentState>> = {
 
 export class StateArbiter extends EventEmitter {
   private readonly tasks = new Map<string, TaskSnapshot>();
+  private readonly reports: TaskReport[] = [];
   private readonly seenEventIds = new Set<string>();
   private preferredTaskId: string | null = null;
   private overlay: ExpressionOverlay | null = null;
@@ -76,14 +78,28 @@ export class StateArbiter extends EventEmitter {
     task.sequence = event.sequence ?? task.sequence;
     task.title = event.title || task.title;
     task.cwd = event.cwd || task.cwd;
-    task.message = event.message || task.message;
+    task.message = reportMessage(event);
+    task.lastEvent = event.type;
 
     if (event.type === "tool.started") task.currentTool = event.tool || "tool";
     if (event.type === "tool.completed" || event.type === "tool.failed") task.currentTool = undefined;
+    if (event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.idle") task.currentTool = undefined;
     if (event.type === "subagent.started") task.subagents += 1;
     if (event.type === "subagent.completed") task.subagents = Math.max(0, task.subagents - 1);
 
     this.tasks.set(task.id, task);
+    this.reports.unshift({
+      id: event.id,
+      taskId: task.id,
+      taskTitle: task.title,
+      source: task.source,
+      type: event.type,
+      state: task.state,
+      message: task.message,
+      tool: event.tool,
+      occurredAt: event.occurredAt,
+    });
+    if (this.reports.length > 40) this.reports.length = 40;
     if (task.state === "failed" || task.state === "waiting_approval") {
       this.preferredTaskId = task.id;
     }
@@ -116,14 +132,21 @@ export class StateArbiter extends EventEmitter {
   }
 
   tick(now = Date.now()): AgentSnapshot {
+    let changed = false;
     for (const task of this.tasks.values()) {
-      if (task.state === "completed" && now - task.updatedAt >= 10_000) {
+      if (task.state === "completed" && now - task.updatedAt >= 4_000) {
         task.state = "idle";
+        task.message = "空闲中";
         task.updatedAt = now;
+        changed = true;
       }
     }
-    this.getOverlay(now);
-    return this.emitSnapshot(now);
+    if (this.overlay && this.overlay.expiresAt <= now) {
+      this.overlay = null;
+      changed = true;
+      this.emit("overlay", null);
+    }
+    return changed ? this.emitSnapshot(now) : this.snapshot(now);
   }
 
   snapshot(now = Date.now()): AgentSnapshot {
@@ -131,6 +154,7 @@ export class StateArbiter extends EventEmitter {
     const activeTaskId = this.activeTaskId(tasks);
     return {
       tasks,
+      reports: this.reports.map((report) => ({ ...report })),
       activeTaskId,
       aggregateState: tasks[0]?.state ?? "idle",
       updatedAt: Math.max(now, ...tasks.map((task) => task.updatedAt)),
@@ -172,4 +196,38 @@ export class StateArbiter extends EventEmitter {
     this.emit("snapshot", value);
     return value;
   }
+}
+
+function reportMessage(event: CanonicalEvent): string {
+  const supplied = event.message?.replace(/\s+/g, " ").trim();
+  if (supplied) return supplied;
+  const tool = friendlyToolName(event.tool);
+  const fallback: Partial<Record<CanonicalEvent["type"], string>> = {
+    "session.started": "任务已连接",
+    "session.idle": "空闲中",
+    "turn.started": "开始处理",
+    "turn.progress": "正在整理上下文",
+    "turn.completed": "已报告完成",
+    "turn.failed": "任务执行失败",
+    "tool.started": `${tool}进行中`,
+    "tool.completed": `${tool}已完成`,
+    "tool.failed": `${tool}失败`,
+    "approval.requested": "等待你的批准",
+    "approval.resolved": "已批准，继续执行",
+    "subagent.started": "子任务已启动",
+    "subagent.completed": "子任务已完成",
+  };
+  return fallback[event.type] || event.type;
+}
+
+function friendlyToolName(tool: string | undefined): string {
+  if (!tool) return "工具";
+  const normalized = tool.toLowerCase();
+  if (normalized.includes("bash") || normalized.includes("exec") || normalized.includes("terminal")) return "终端命令";
+  if (normalized.includes("read") || normalized.includes("find") || normalized === "rg") return "文件读取";
+  if (normalized.includes("write") || normalized.includes("edit") || normalized.includes("patch")) return "文件修改";
+  if (normalized.includes("web") || normalized.includes("search")) return "网页查询";
+  if (normalized.includes("image")) return "图片处理";
+  if (normalized.includes("mcp")) return "MCP 工具";
+  return tool.length > 18 ? `${tool.slice(0, 17)}…` : tool;
 }
