@@ -263,6 +263,78 @@ export interface DeviceCapabilities {
   speaker: boolean;
   rgbCount: number;
   sdCard: boolean;
+  camera?: boolean;
+  imu?: boolean;
+  ambientLight?: boolean;
+  proximity?: boolean;
+  headTouch?: boolean;
+  battery?: boolean;
+}
+
+export interface SensorVector3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface SensorSnapshot {
+  requestId: string;
+  deviceUptimeMs: number;
+  receivedAt: number;
+  battery: {
+    voltageV: number | null;
+    currentA: number | null;
+    charging: boolean | null;
+  };
+  imu: {
+    available: boolean;
+    accelerationG: SensorVector3 | null;
+    gyroscopeDps: SensorVector3 | null;
+    magnetometerUt: SensorVector3 | null;
+  };
+  environment: {
+    available: boolean;
+    ambientChannel0: number | null;
+    ambientChannel1: number | null;
+    proximityRaw: number | null;
+  };
+  touch: {
+    screenPressed: boolean;
+    headZones: [number, number, number];
+  };
+  motion: {
+    servoPower: boolean;
+    active: boolean;
+    yawDegrees: number | null;
+    pitchDegrees: number | null;
+  };
+}
+
+export interface HardwareCommandResult {
+  requestId: string;
+  command: "light" | "sound" | "servo" | "servo_home" | "servo_inspect";
+  ok: boolean;
+  error?: string;
+  measuredBeforeRelease?: { yawDegrees: number | null; pitchDegrees: number | null };
+}
+
+export interface DeviceInputEvent {
+  id: number;
+  type: string;
+  source: string;
+  deviceUptimeMs: number;
+  receivedAt: number;
+}
+
+export interface CameraCaptureResult {
+  requestId: string;
+  path: string;
+  mimeType: "image/jpeg";
+  width: number;
+  height: number;
+  size: number;
+  sha256: string;
+  capturedAt: number;
 }
 
 export interface DeviceStatus {
@@ -294,6 +366,17 @@ export type DeviceMessageType =
   | "pack.chunk"
   | "pack.commit"
   | "input.event"
+  | "sensor.request"
+  | "sensor.snapshot"
+  | "camera.request"
+  | "camera.chunk"
+  | "camera.result"
+  | "hardware.light"
+  | "hardware.sound"
+  | "hardware.servo"
+  | "hardware.servo.home"
+  | "hardware.servo.inspect"
+  | "hardware.result"
   | "ack"
   | "error";
 

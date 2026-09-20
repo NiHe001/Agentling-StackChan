@@ -6,6 +6,7 @@
 #include <SD.h>
 #include <M5StackChan.h>
 #include <array>
+#include <climits>
 
 #include "PackStore.h"
 #include "Protocol.h"
@@ -44,9 +45,21 @@ private:
     void parsePackManifest(CborReader& reader);
     void parsePackChunk(CborReader& reader);
     void parsePackCommit(CborReader& reader);
+    void parseSensorRequest(CborReader& reader);
+    void parseCameraRequest(CborReader& reader);
+    void parseLightCommand(CborReader& reader);
+    void parseSoundCommand(CborReader& reader);
+    void parseServoCommand(CborReader& reader);
+    void parseServoHomeCommand(CborReader& reader);
+    void parseServoInspectCommand(CborReader& reader);
 
     void sendHello();
-    void sendInput(const char* type);
+    void sendInput(const char* type, const char* source = "screen");
+    void sendSensorSnapshot(const String& requestId);
+    void sendCameraResult(const String& requestId, bool ok, const char* error = nullptr,
+                          size_t totalBytes = 0, size_t width = 0, size_t height = 0);
+    void sendHardwareResult(const String& requestId, const char* command, bool ok,
+                            const char* error = nullptr);
     void sendError(const String& message);
     LovyanGFX& renderTarget();
     void render();
@@ -63,12 +76,24 @@ private:
     void setExpression(const String& name);
     void applyMotion(const String& name);
     void applySound(const String& name);
+    bool playSoundPreset(const String& name, uint8_t volumePercent, uint32_t maxDurationMs);
     void updateSound();
     void applyLight(const String& name);
+    void setDirectLight(uint32_t color, uint8_t brightness, const String& mode,
+                        uint32_t periodMs, uint32_t ttlMs);
     void updateLight();
+    void updateServoMotion();
+    void finishServoMotion(bool ok, const char* error = nullptr);
     void updateVisual();
     void updateTouch();
+    void updatePhysicalSensors();
+    void updateHeadTouch();
+    void updateCameraConsent();
     void updateIdle();
+    void renderCameraConsent();
+    bool beginEnvironmentSensor();
+    bool captureCamera(const String& requestId);
+    void finishCameraConsent();
     String sceneForState() const;
     String expressionForState() const;
     QuotaValue quotaForAlias(const String& alias) const;
@@ -125,15 +150,41 @@ private:
     size_t melodyIndex_{0};
     uint16_t melodyNoteMs_{90};
     uint32_t melodyNextAt_{0};
+    uint32_t soundStopAt_{0};
     String lightMode_{"solid"};
     uint32_t lightColor_{0};
     uint8_t lightBrightness_{0};
     uint32_t lightPeriodMs_{1000};
     uint32_t lightStartedAt_{0};
     uint32_t lastLightUpdateAt_{0};
+    bool lightOverrideActive_{false};
+    uint32_t lightOverrideDeadline_{0};
+    String savedLightMode_{"solid"};
+    uint32_t savedLightColor_{0};
+    uint8_t savedLightBrightness_{0};
+    uint32_t savedLightPeriodMs_{1000};
+    uint8_t servoPhase_{0};
+    bool servoPowerEnabled_{false};
+    int servoYawTenths_{INT_MIN};
+    int servoPitchTenths_{INT_MIN};
+    int servoTargetYawTenths_{0};
+    int servoTargetPitchTenths_{0};
+    uint32_t servoHoldMs_{700};
+    uint32_t servoLastStepAt_{0};
+    uint32_t servoNextAt_{0};
+    uint32_t servoDeadline_{0};
+    uint32_t lastServoCompletedAt_{0};
+    String servoRequestId_;
     bool touchDown_{false};
     int touchStartX_{0};
     int touchStartY_{0};
+    bool environmentSensorReady_{false};
+    uint32_t lastPhysicalSensorAt_{0};
+    uint32_t lastShakeAt_{0};
+    bool cameraConsentPending_{false};
+    bool cameraCapturing_{false};
+    String cameraRequestId_;
+    uint32_t cameraConsentDeadline_{0};
     String lastBehaviorName_;
     uint32_t lastBehaviorStartedAt_{0};
 };

@@ -1,3 +1,4 @@
-# Head servos are deliberately disabled in firmware 0.2.x. Keep this file so
-# packs remain forward-compatible when motion is explicitly re-enabled later.
+# Autonomous pack-driven head motion stays disabled. Firmware 0.6.2 also rejects
+# remote servo commands until raw position-read failures can be distinguished
+# from real endpoint angles. No pack or direct MCP motion is currently allowed.
 motions: {}

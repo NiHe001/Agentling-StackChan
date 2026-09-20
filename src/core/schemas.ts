@@ -124,3 +124,24 @@ export const progressRequestSchema = z.object({
   total: z.number().finite().positive(),
   ttlMs: z.number().int().min(5_000).max(30_000).default(10_000),
 });
+
+export const lightSetRequestSchema = z.object({
+  color,
+  brightness: z.number().int().min(0).max(80).default(40),
+  mode: z.enum(["solid", "breathe", "pulse", "chase"]).default("solid"),
+  periodMs: z.number().int().min(300).max(5_000).default(1_200),
+  ttlMs: z.number().int().min(1_000).max(30_000).default(10_000),
+});
+
+export const soundPlayRequestSchema = z.object({
+  preset: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/).max(48),
+  volumePercent: z.number().int().min(0).max(50).default(25),
+  maxDurationMs: z.number().int().min(100).max(3_000).default(1_500),
+});
+
+export const servoMoveRequestSchema = z.object({
+  yawDegrees: z.number().finite().min(-30).max(30),
+  pitchDegrees: z.number().finite().min(0).max(20),
+  speedPercent: z.number().int().min(10).max(50).default(25),
+  holdMs: z.number().int().min(300).max(2_000).default(700),
+});

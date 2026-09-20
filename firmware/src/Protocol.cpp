@@ -192,6 +192,16 @@ void CborWriter::bytes(const uint8_t* value, size_t size) {
     data_.insert(data_.end(), value, value + size);
 }
 void CborWriter::unsignedInteger(uint64_t value) { header(0, value); }
+void CborWriter::number(double value) {
+    float compact = static_cast<float>(value);
+    uint32_t bits = 0;
+    std::memcpy(&bits, &compact, sizeof(bits));
+    data_.push_back(0xfa);
+    data_.push_back(static_cast<uint8_t>(bits >> 24));
+    data_.push_back(static_cast<uint8_t>(bits >> 16));
+    data_.push_back(static_cast<uint8_t>(bits >> 8));
+    data_.push_back(static_cast<uint8_t>(bits));
+}
 void CborWriter::boolean(bool value) { data_.push_back(value ? 0xf5 : 0xf4); }
 void CborWriter::nullValue() { data_.push_back(0xf6); }
 

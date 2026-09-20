@@ -31,4 +31,16 @@ describe("device framing", () => {
     expect(() => decoder.push(corrupt)).toThrow();
     expect(decoder.push(encodeEnvelope(envelope))).toEqual([envelope]);
   });
+
+  it("round trips binary camera chunks", () => {
+    const cameraChunk: DeviceEnvelope = {
+      protocol: 1,
+      epoch: 8,
+      sequence: 10,
+      type: "camera.chunk",
+      sentAt: 5678,
+      payload: { requestId: "capture-1", offset: 0, data: Uint8Array.from([0xff, 0xd8, 0, 1, 0xff, 0xd9]) },
+    };
+    expect(decodeEnvelope(encodeEnvelope(cameraChunk).slice(0, -1))).toEqual(cameraChunk);
+  });
 });

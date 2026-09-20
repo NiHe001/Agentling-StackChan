@@ -1,0 +1,3 @@
+[mcp_servers.agentling_stackchan]
+command = "/opt/homebrew/bin/node"
+args = ["/Users/zhaolq/develop_zlq/AIRobot/Agentling-StackChan/dist/mcp/index.js"]

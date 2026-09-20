@@ -1,7 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AgentlingRuntime } from "../runtime";
 import type { HostConfig } from "../config";
-import { expressionRequestSchema, progressRequestSchema, uiConfigSchema } from "../../core/schemas";
+import {
+  expressionRequestSchema,
+  lightSetRequestSchema,
+  progressRequestSchema,
+  servoMoveRequestSchema,
+  soundPlayRequestSchema,
+  uiConfigSchema,
+} from "../../core/schemas";
 import { z } from "zod";
 import { compilePack } from "../../core/pack";
 
@@ -40,6 +47,7 @@ export class LocalApiServer {
       }
       if (request.method === "GET" && url.pathname === "/v1/device/ports") return this.json(response, 200, await this.runtime.device.listPorts());
       if (request.method === "GET" && url.pathname === "/v1/device/diagnostics") return this.json(response, 200, await this.runtime.device.diagnostics());
+      if (request.method === "GET" && url.pathname === "/v1/device/sensors") return this.json(response, 200, await this.runtime.device.sensors());
       if (request.method !== "POST") return this.json(response, 404, { error: "not found" });
       const body = await readJson(request);
       if (url.pathname === "/v1/layout/save") {
@@ -53,6 +61,32 @@ export class LocalApiServer {
         return this.json(response, 200, await this.runtime.device.connect(path));
       }
       if (url.pathname === "/v1/device/disconnect") { await this.runtime.device.disconnect(); return this.json(response, 200, { ok: true }); }
+      if (url.pathname === "/v1/device/events/wait") {
+        const value = z.object({
+          types: z.array(z.string().min(1).max(48)).max(16).optional(),
+          afterId: z.number().int().nonnegative().optional(),
+          timeoutMs: z.number().int().min(0).max(30_000).default(15_000),
+        }).parse(body);
+        return this.json(response, 200, await this.runtime.device.waitForInputEvent(value));
+      }
+      if (url.pathname === "/v1/device/camera/capture") {
+        return this.json(response, 200, await this.runtime.device.captureCamera());
+      }
+      if (url.pathname === "/v1/device/light") {
+        return this.json(response, 200, await this.runtime.device.setLight(lightSetRequestSchema.parse(body)));
+      }
+      if (url.pathname === "/v1/device/sound") {
+        return this.json(response, 200, await this.runtime.device.playSound(soundPlayRequestSchema.parse(body)));
+      }
+      if (url.pathname === "/v1/device/servo") {
+        return this.json(response, 200, await this.runtime.device.moveServo(servoMoveRequestSchema.parse(body)));
+      }
+      if (url.pathname === "/v1/device/servo/home") {
+        return this.json(response, 200, await this.runtime.device.recoverServoHome());
+      }
+      if (url.pathname === "/v1/device/servo/inspect") {
+        return this.json(response, 200, await this.runtime.device.inspectServo());
+      }
       if (url.pathname === "/v1/pack/validate" || url.pathname === "/v1/pack/load") {
         const { directory } = z.object({ directory: z.string().min(1) }).parse(body);
         const pack = url.pathname.endsWith("validate") ? await compilePack(directory) : await this.runtime.loadPack(directory);

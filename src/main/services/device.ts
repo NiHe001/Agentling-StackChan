@@ -1,8 +1,10 @@
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { SerialPort } from "serialport";
+import { DeviceEventQueue } from "../../core/device-events";
 import { DeviceFrameDecoder, encodeEnvelope } from "../../core/protocol";
 import { resolveLayout } from "../../core/layout";
 import type {
@@ -11,7 +13,11 @@ import type {
   DeviceCapabilities,
   DeviceEnvelope,
   DeviceStatus,
+  DeviceInputEvent,
   ExpressionOverlay,
+  HardwareCommandResult,
+  SensorSnapshot,
+  CameraCaptureResult,
   UsageSnapshot,
   WeatherSnapshot,
   ClockSnapshot,
@@ -22,6 +28,26 @@ import type { HostConfig } from "../config";
 // halving the ACK count versus the original 1 KiB transfer.
 const PACK_CHUNK_BYTES = 2 * 1024;
 const SERIAL_DEBUG = process.env.AGENTLING_SERIAL_DEBUG === "1";
+const CAMERA_MAX_BYTES = 1024 * 1024;
+
+interface PendingSensorRequest {
+  resolve(value: SensorSnapshot): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+}
+
+interface PendingCameraRequest {
+  resolve(value: CameraCaptureResult): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+  chunks: Array<{ offset: number; data: Uint8Array }>;
+}
+
+interface PendingHardwareRequest {
+  resolve(value: HardwareCommandResult): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+}
 
 export interface SerialPortInfo {
   path: string;
@@ -38,6 +64,10 @@ export class DeviceService extends EventEmitter {
   private lastReceivedSequence = 0;
   private lastAcknowledgedSequence = 0;
   private syncingPack = false;
+  private readonly inputEvents = new DeviceEventQueue();
+  private readonly pendingSensorRequests = new Map<string, PendingSensorRequest>();
+  private readonly pendingCameraRequests = new Map<string, PendingCameraRequest>();
+  private readonly pendingHardwareRequests = new Map<string, PendingHardwareRequest>();
   private readonly pendingAcks = new Map<
     number,
     { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout }
@@ -98,6 +128,8 @@ export class DeviceService extends EventEmitter {
     this.port.on("close", () => {
       this.port = null;
       this.status = { connected: false, path: portPath };
+      this.rejectPendingAcks(new Error("StackChan disconnected"));
+      this.rejectHardwareRequests(new Error("StackChan disconnected"));
       this.emit("status", this.current());
     });
     await new Promise<void>((resolve, reject) => this.port?.open((error) => (error ? reject(error) : resolve())));
@@ -140,6 +172,7 @@ export class DeviceService extends EventEmitter {
       this.emit("status", this.current());
     }
     this.rejectPendingAcks(new Error("StackChan disconnected"));
+    this.rejectHardwareRequests(new Error("StackChan disconnected"));
   }
 
   current(): DeviceStatus {
@@ -159,6 +192,105 @@ export class DeviceService extends EventEmitter {
       }
     }
     throw lastError ?? new Error("Diagnostics timeout");
+  }
+
+  async sensors(): Promise<SensorSnapshot> {
+    if (!this.status.connected) throw new Error("StackChan is not connected");
+    const requestId = randomUUID();
+    return new Promise<SensorSnapshot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSensorRequests.delete(requestId);
+        reject(new Error("Sensor snapshot timeout"));
+      }, 5_000);
+      timer.unref();
+      this.pendingSensorRequests.set(requestId, { resolve, reject, timer });
+      if (!this.send("sensor.request", { requestId })) {
+        clearTimeout(timer);
+        this.pendingSensorRequests.delete(requestId);
+        reject(new Error("StackChan is not connected"));
+      }
+    });
+  }
+
+  async waitForInputEvent(input: {
+    types?: string[];
+    afterId?: number;
+    timeoutMs: number;
+  }): Promise<{ event: DeviceInputEvent | null; latestId: number }> {
+    const cursor = input.afterId ?? this.inputEvents.latestId();
+    const existing = this.inputEvents.findAfter(cursor, input.types);
+    if (existing) return { event: existing, latestId: this.inputEvents.latestId() };
+    if (input.timeoutMs === 0) return { event: null, latestId: this.inputEvents.latestId() };
+    if (!this.status.connected) throw new Error("StackChan is not connected");
+
+    return new Promise((resolve) => {
+      const onEvent = (event: DeviceInputEvent) => {
+        if (event.id <= cursor || (input.types?.length && !input.types.includes(event.type))) return;
+        clearTimeout(timer);
+        this.off("input-event", onEvent);
+        resolve({ event, latestId: this.inputEvents.latestId() });
+      };
+      const timer = setTimeout(() => {
+        this.off("input-event", onEvent);
+        resolve({ event: null, latestId: this.inputEvents.latestId() });
+      }, input.timeoutMs);
+      timer.unref();
+      this.on("input-event", onEvent);
+    });
+  }
+
+  async captureCamera(): Promise<CameraCaptureResult> {
+    if (!this.status.connected) throw new Error("StackChan is not connected");
+    if (this.pendingCameraRequests.size > 0) throw new Error("A camera confirmation is already pending");
+    const requestId = randomUUID();
+    return new Promise<CameraCaptureResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCameraRequests.delete(requestId);
+        reject(new Error("Camera confirmation or capture timed out"));
+      }, 25_000);
+      timer.unref();
+      this.pendingCameraRequests.set(requestId, { resolve, reject, timer, chunks: [] });
+      if (!this.send("camera.request", { requestId })) {
+        clearTimeout(timer);
+        this.pendingCameraRequests.delete(requestId);
+        reject(new Error("StackChan is not connected"));
+      }
+    });
+  }
+
+  setLight(input: {
+    color: string;
+    brightness: number;
+    mode: "solid" | "breathe" | "pulse" | "chase";
+    periodMs: number;
+    ttlMs: number;
+  }): Promise<HardwareCommandResult> {
+    return this.requestHardwareCommand("hardware.light", "light", input);
+  }
+
+  playSound(input: {
+    preset: string;
+    volumePercent: number;
+    maxDurationMs: number;
+  }): Promise<HardwareCommandResult> {
+    return this.requestHardwareCommand("hardware.sound", "sound", input);
+  }
+
+  moveServo(input: {
+    yawDegrees: number;
+    pitchDegrees: number;
+    speedPercent: number;
+    holdMs: number;
+  }): Promise<HardwareCommandResult> {
+    return this.requestHardwareCommand("hardware.servo", "servo", input);
+  }
+
+  recoverServoHome(): Promise<HardwareCommandResult> {
+    return Promise.reject(new Error("Automatic servo recovery has been removed; use a normal move to the default pose after bench validation"));
+  }
+
+  inspectServo(): Promise<HardwareCommandResult> {
+    return this.requestHardwareCommand("hardware.servo.inspect", "servo_inspect", {});
   }
 
   private requestDiagnostics(): Promise<DeviceStatus> {
@@ -344,7 +476,39 @@ export class DeviceService extends EventEmitter {
           this.emit("diagnostics");
           if (!wasConnected) this.emit("ready");
         } else if (message.type === "input.event") {
-          this.emit("input", message.payload);
+          const payload = message.payload as { type?: unknown; source?: unknown; at?: unknown };
+          const event = this.inputEvents.push(payload);
+          this.emit("input", payload);
+          this.emit("input-event", event);
+        } else if (message.type === "sensor.snapshot") {
+          const snapshot = {
+            ...(message.payload as Omit<SensorSnapshot, "receivedAt">),
+            receivedAt: Date.now(),
+          };
+          const pending = this.pendingSensorRequests.get(snapshot.requestId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingSensorRequests.delete(snapshot.requestId);
+            pending.resolve(snapshot);
+          }
+        } else if (message.type === "camera.chunk") {
+          const payload = message.payload as { requestId?: string; offset?: number; data?: Uint8Array };
+          const pending = payload.requestId ? this.pendingCameraRequests.get(payload.requestId) : undefined;
+          if (pending && Number.isInteger(payload.offset) && payload.offset! >= 0 && payload.data instanceof Uint8Array &&
+              payload.data.byteLength <= PACK_CHUNK_BYTES && payload.offset! + payload.data.byteLength <= CAMERA_MAX_BYTES) {
+            pending.chunks.push({ offset: payload.offset!, data: payload.data });
+          }
+        } else if (message.type === "camera.result") {
+          void this.completeCameraCapture(message.payload as Record<string, unknown>);
+        } else if (message.type === "hardware.result") {
+          const result = message.payload as HardwareCommandResult;
+          const pending = this.pendingHardwareRequests.get(result.requestId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingHardwareRequests.delete(result.requestId);
+            if (result.ok) pending.resolve(result);
+            else pending.reject(new Error(result.error || `${result.command || "hardware"} command rejected`));
+          }
         } else if (message.type === "error") {
           const messageText = String((message.payload as { message?: string }).message || "device error");
           if (SERIAL_DEBUG) console.error(`[agentling:serial] device error: ${messageText}`);
@@ -382,6 +546,93 @@ export class DeviceService extends EventEmitter {
       pending.reject(error);
     }
     this.pendingAcks.clear();
+  }
+
+  private rejectHardwareRequests(error: Error): void {
+    for (const pending of this.pendingSensorRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingSensorRequests.clear();
+    for (const pending of this.pendingCameraRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingCameraRequests.clear();
+    for (const pending of this.pendingHardwareRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingHardwareRequests.clear();
+  }
+
+  private requestHardwareCommand(
+    type: "hardware.light" | "hardware.sound" | "hardware.servo" | "hardware.servo.home" | "hardware.servo.inspect",
+    command: HardwareCommandResult["command"],
+    payload: Record<string, unknown>,
+  ): Promise<HardwareCommandResult> {
+    if (!this.status.connected) return Promise.reject(new Error("StackChan is not connected"));
+    const requestId = randomUUID();
+    return new Promise<HardwareCommandResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingHardwareRequests.delete(requestId);
+        reject(new Error(`${command} command timeout`));
+      }, command === "servo" ? 27_000 : 5_000);
+      timer.unref();
+      this.pendingHardwareRequests.set(requestId, { resolve, reject, timer });
+      if (!this.send(type, { requestId, ...payload })) {
+        clearTimeout(timer);
+        this.pendingHardwareRequests.delete(requestId);
+        reject(new Error("StackChan is not connected"));
+      }
+    });
+  }
+
+  private async completeCameraCapture(payload: Record<string, unknown>): Promise<void> {
+    const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+    const pending = this.pendingCameraRequests.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingCameraRequests.delete(requestId);
+    try {
+      if (payload.ok !== true) throw new Error(typeof payload.error === "string" ? payload.error : "Camera capture rejected");
+      const totalBytes = typeof payload.totalBytes === "number" ? payload.totalBytes : -1;
+      const width = typeof payload.width === "number" ? payload.width : 0;
+      const height = typeof payload.height === "number" ? payload.height : 0;
+      if (!Number.isInteger(totalBytes) || totalBytes <= 0 || totalBytes > CAMERA_MAX_BYTES) {
+        throw new Error("Camera returned an invalid image size");
+      }
+      pending.chunks.sort((left, right) => left.offset - right.offset);
+      let expectedOffset = 0;
+      const buffers: Buffer[] = [];
+      for (const chunk of pending.chunks) {
+        if (chunk.offset !== expectedOffset) throw new Error(`Camera image has a gap at byte ${expectedOffset}`);
+        const buffer = Buffer.from(chunk.data);
+        buffers.push(buffer);
+        expectedOffset += buffer.length;
+      }
+      if (expectedOffset !== totalBytes) throw new Error(`Camera image is incomplete (${expectedOffset}/${totalBytes} bytes)`);
+      const image = Buffer.concat(buffers);
+      if (image[0] !== 0xff || image[1] !== 0xd8 || image.at(-2) !== 0xff || image.at(-1) !== 0xd9) {
+        throw new Error("Camera returned invalid JPEG data");
+      }
+      const directory = path.join(os.tmpdir(), "agentling-stackchan-camera");
+      await fs.mkdir(directory, { recursive: true });
+      const target = path.join(directory, `capture-${Date.now()}-${requestId.slice(0, 8)}.jpg`);
+      await fs.writeFile(target, image, { mode: 0o600 });
+      pending.resolve({
+        requestId,
+        path: target,
+        mimeType: "image/jpeg",
+        width,
+        height,
+        size: image.length,
+        sha256: createHash("sha256").update(image).digest("hex"),
+        capturedAt: Date.now(),
+      });
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 }
 

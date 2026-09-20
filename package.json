@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:servo": "node scripts/test-servo-safety.mjs",
     "hooks:install": "node scripts/install-codex-hooks.mjs",
     "firmware:build": "platformio run -d firmware",
     "firmware:upload": "platformio run -d firmware -t upload",

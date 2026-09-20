@@ -1,13 +1,40 @@
 #include "AgentlingApp.h"
+#include "ServoFeedback.h"
 
 #include <LittleFS.h>
 #include <SD.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <esp_camera.h>
+#include <img_converters.h>
 
 namespace agentling {
 
 namespace {
+
+constexpr uint8_t LTR553_ADDRESS = 0x23;
+constexpr uint8_t LTR553_ALS_CONTR = 0x80;
+constexpr uint8_t LTR553_PS_CONTR = 0x81;
+constexpr uint8_t LTR553_ALS_DATA_CH1_0 = 0x88;
+constexpr uint32_t SENSOR_I2C_HZ = 400000;
+constexpr size_t CAMERA_CHUNK_BYTES = 2048;
+constexpr uint32_t CAMERA_CONSENT_MS = 15000;
+constexpr uint32_t SERVO_COMMAND_COOLDOWN_MS = 1000;
+// Verified against the independent vendor-driver baseline on this device.
+constexpr bool SERVO_REMOTE_MOTION_ENABLED = true;
+
+bool isHexColor(const String& value) {
+    if (value.length() != 7 || value[0] != '#') return false;
+    for (size_t index = 1; index < value.length(); ++index) {
+        const char character = value[index];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f') ||
+              (character >= 'A' && character <= 'F'))) return false;
+    }
+    return true;
+}
 
 bool readNullableNumber(CborReader& reader, double& value) {
     if (reader.peekMajor() == 7 && reader.readNull()) return false;
@@ -40,10 +67,10 @@ void AgentlingApp::begin() {
     config.clear_display = true;
     config.output_power = true;
     M5StackChan.begin();
-    // This release keeps the head still: the BSP enables the servo rail while
-    // booting, so disable both torque and power immediately after begin().
+    // The BSP adapter leaves servo power off throughout boot.
     M5StackChan.Motion.setTorqueEnabled(false);
     M5StackChan.setServoPowerEnabled(false);
+    environmentSensorReady_ = beginEnvironmentSensor();
     // Build every frame away from the LCD, then transfer it in one operation.
     // CoreS3 has PSRAM and M5Canvas uses it by default, so a 320x240 RGB565
     // frame does not consume the small internal heap.
@@ -79,8 +106,13 @@ void AgentlingApp::update() {
     updateLight();
     updateVisual();
     updateTouch();
+    updateHeadTouch();
+    updatePhysicalSensors();
+    updateServoMotion();
+    updateCameraConsent();
     updateIdle();
     if (hostOnline_ && millis() - lastHostMessageAt_ > 15'000) {
+        if (servoPhase_) finishServoMotion(false, "host disconnected");
         hostOnline_ = false;
         state_ = "offline";
         statusMessage_ = stateLabel(state_);
@@ -115,6 +147,13 @@ void AgentlingApp::handleEnvelope(const EnvelopeView& envelope) {
         parsePackCommit(payload);
         renderDirty_ = true;
     }
+    else if (envelope.type == "sensor.request") parseSensorRequest(payload);
+    else if (envelope.type == "camera.request") parseCameraRequest(payload);
+    else if (envelope.type == "hardware.light") parseLightCommand(payload);
+    else if (envelope.type == "hardware.sound") parseSoundCommand(payload);
+    else if (envelope.type == "hardware.servo") parseServoCommand(payload);
+    else if (envelope.type == "hardware.servo.home") parseServoHomeCommand(payload);
+    else if (envelope.type == "hardware.servo.inspect") parseServoInspectCommand(payload);
 }
 
 bool AgentlingApp::parseAgentSnapshot(CborReader& reader) {
@@ -377,6 +416,217 @@ void AgentlingApp::parsePackCommit(CborReader& reader) {
     if (!hasPack_) sendError(packStore_.error());
 }
 
+void AgentlingApp::parseSensorRequest(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String requestId;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "requestId") reader.readText(requestId);
+        else if (!reader.skipValue()) return;
+    }
+    if (!requestId.isEmpty()) sendSensorSnapshot(requestId);
+}
+
+void AgentlingApp::parseCameraRequest(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String requestId;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "requestId") reader.readText(requestId);
+        else if (!reader.skipValue()) return;
+    }
+    if (requestId.isEmpty()) return;
+    if (cameraConsentPending_ || cameraCapturing_) {
+        sendCameraResult(requestId, false, "camera busy");
+        return;
+    }
+    cameraRequestId_ = requestId;
+    cameraConsentPending_ = true;
+    cameraConsentDeadline_ = millis() + CAMERA_CONSENT_MS;
+    touchDown_ = false;
+    renderDirty_ = true;
+}
+
+void AgentlingApp::parseLightCommand(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String requestId, color, mode;
+    double brightness = -1, periodMs = -1, ttlMs = -1;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "requestId") reader.readText(requestId);
+        else if (key == "color") reader.readText(color);
+        else if (key == "mode") reader.readText(mode);
+        else if (key == "brightness") reader.readNumber(brightness);
+        else if (key == "periodMs") reader.readNumber(periodMs);
+        else if (key == "ttlMs") reader.readNumber(ttlMs);
+        else if (!reader.skipValue()) return;
+    }
+    const bool validMode = mode == "solid" || mode == "breathe" || mode == "pulse" || mode == "chase";
+    if (requestId.isEmpty() || !isHexColor(color) || !validMode ||
+        brightness < 0 || brightness > 80 || periodMs < 300 || periodMs > 5000 ||
+        ttlMs < 1000 || ttlMs > 30000) {
+        sendHardwareResult(requestId, "light", false, "invalid light parameters");
+        return;
+    }
+    setDirectLight(parseColor(color.c_str(), 0), static_cast<uint8_t>(brightness), mode,
+                   static_cast<uint32_t>(periodMs), static_cast<uint32_t>(ttlMs));
+    sendHardwareResult(requestId, "light", true);
+}
+
+void AgentlingApp::parseSoundCommand(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String requestId, preset;
+    double volumePercent = -1, maxDurationMs = -1;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "requestId") reader.readText(requestId);
+        else if (key == "preset") reader.readText(preset);
+        else if (key == "volumePercent") reader.readNumber(volumePercent);
+        else if (key == "maxDurationMs") reader.readNumber(maxDurationMs);
+        else if (!reader.skipValue()) return;
+    }
+    if (requestId.isEmpty() || preset.isEmpty() || volumePercent < 0 || volumePercent > 50 ||
+        maxDurationMs < 100 || maxDurationMs > 3000) {
+        sendHardwareResult(requestId, "sound", false, "invalid sound parameters");
+        return;
+    }
+    if (!playSoundPreset(preset, static_cast<uint8_t>(volumePercent), static_cast<uint32_t>(maxDurationMs))) {
+        sendHardwareResult(requestId, "sound", false, "unknown sound preset");
+        return;
+    }
+    sendHardwareResult(requestId, "sound", true);
+}
+
+void AgentlingApp::parseServoCommand(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String requestId;
+    double yawDegrees = NAN, pitchDegrees = NAN, speedPercent = NAN, holdMs = NAN;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "requestId") reader.readText(requestId);
+        else if (key == "yawDegrees") reader.readNumber(yawDegrees);
+        else if (key == "pitchDegrees") reader.readNumber(pitchDegrees);
+        else if (key == "speedPercent") reader.readNumber(speedPercent);
+        else if (key == "holdMs") reader.readNumber(holdMs);
+        else if (!reader.skipValue()) return;
+    }
+    if (requestId.isEmpty() || !isfinite(yawDegrees) || !isfinite(pitchDegrees) ||
+        yawDegrees < -30 || yawDegrees > 30 || pitchDegrees < 0 || pitchDegrees > 20 ||
+        !isfinite(speedPercent) || !isfinite(holdMs) ||
+        speedPercent < 10 || speedPercent > 50 || holdMs < 300 || holdMs > 2000) {
+        sendHardwareResult(requestId, "servo", false, "invalid servo parameters");
+        return;
+    }
+    if (!SERVO_REMOTE_MOTION_ENABLED) {
+        M5StackChan.Motion.setTorqueEnabled(false);
+        M5StackChan.setServoPowerEnabled(false);
+        servoPowerEnabled_ = false;
+        sendHardwareResult(requestId, "servo", false,
+                           "servo movement disabled: untrusted position feedback");
+        return;
+    }
+    if (servoPhase_ != 0) {
+        sendHardwareResult(requestId, "servo", false, "servo movement already active");
+        return;
+    }
+    if (lastServoCompletedAt_ && millis() - lastServoCompletedAt_ < SERVO_COMMAND_COOLDOWN_MS) {
+        sendHardwareResult(requestId, "servo", false, "servo cooldown active");
+        return;
+    }
+
+    servoTargetYawTenths_ = static_cast<int>(round(yawDegrees * 10.0));
+    servoTargetPitchTenths_ = static_cast<int>(round(pitchDegrees * 10.0));
+    servoHoldMs_ = static_cast<uint32_t>(holdMs);
+    servoRequestId_ = requestId;
+    M5StackChan.setServoPowerEnabled(true);
+    servoPowerEnabled_ = true;
+    delay(2000); // Cold servo rail: 500 ms produced reproducible no-reply errors.
+    if (!M5StackChan.Motion.prepareSafe()) {
+        finishServoMotion(false, M5StackChan.Motion.safetyError());
+        return;
+    }
+    const auto current = M5StackChan.Motion.getCurrentAngles();
+    if (current.x == INVALID_SERVO_ANGLE || current.y == INVALID_SERVO_ANGLE) {
+        finishServoMotion(false, "invalid feedback after preparation");
+        return;
+    }
+    servoYawTenths_ = current.x;
+    servoPitchTenths_ = current.y;
+    // Program the controller with its physical position while torque is still
+    // disabled. Enabling torque before this synchronization can make it snap
+    // toward an old retained target.
+    M5StackChan.Motion.setAutoAngleSyncEnabled(true);
+    M5StackChan.Motion.setAutoTorqueReleaseEnabled(false);
+    if (!M5StackChan.Motion.enablePreparedTorque()) {
+        finishServoMotion(false, "torque enable verification failed");
+        return;
+    }
+    // One official spring target, speed in the BSP's 0..1000 units.
+    M5StackChan.Motion.move(servoTargetYawTenths_, servoTargetPitchTenths_,
+                           static_cast<int>(speedPercent * 10));
+    servoPhase_ = 1;
+    servoLastStepAt_ = 0;
+    servoNextAt_ = 0;
+    servoDeadline_ = millis() + 20000;
+}
+
+void AgentlingApp::parseServoHomeCommand(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String requestId;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "requestId") reader.readText(requestId);
+        else if (!reader.skipValue()) return;
+    }
+    if (requestId.isEmpty()) return;
+    if (servoPhase_ != 0) {
+        sendHardwareResult(requestId, "servo_home", false, "servo movement already active");
+        return;
+    }
+    sendHardwareResult(requestId, "servo_home", false,
+                       "automatic recovery removed; default pose is a normal move to yaw=0 pitch=0 after bench validation");
+}
+
+void AgentlingApp::parseServoInspectCommand(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String requestId;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "requestId") reader.readText(requestId);
+        else if (!reader.skipValue()) return;
+    }
+    if (requestId.isEmpty()) return;
+    if (servoPhase_ != 0) {
+        sendHardwareResult(requestId, "servo_inspect", false, "servo movement already active");
+        return;
+    }
+    // Diagnostic only: force torque off, read back state, and always cut rail
+    // power. This path never calls enablePreparedTorque or commands movement.
+    M5StackChan.Motion.setTorqueEnabled(false);
+    M5StackChan.setServoPowerEnabled(true);
+    servoPowerEnabled_ = true;
+    delay(2000);
+    const String diagnostic = M5StackChan.Motion.inspectServos().c_str();
+    M5StackChan.Motion.setTorqueEnabled(false);
+    M5StackChan.setServoPowerEnabled(false);
+    servoPowerEnabled_ = false;
+    sendHardwareResult(requestId, "servo_inspect", true, diagnostic.c_str());
+}
+
 void AgentlingApp::sendHello() {
     protocol_.send(Serial, "device.hello", [this](CborWriter& writer) {
         writer.map(4);
@@ -404,28 +654,120 @@ void AgentlingApp::sendHello() {
         writer.key("activeTaskTitle"); writer.text(activeTaskTitle_);
         writer.key("activeTaskReport"); writer.text(activeTaskReport_);
         writer.key("localTime"); writer.text(localTime_);
-        writer.key("firmwareVersion"); writer.text("0.4.1");
+        writer.key("firmwareVersion"); writer.text("0.7.0");
         writer.key("protocolVersion"); writer.unsignedInteger(AGENTLING_PROTOCOL_VERSION);
         writer.key("capabilities");
-        writer.map(5);
+        writer.map(11);
         writer.key("display"); writer.map(3);
         writer.key("width"); writer.unsignedInteger(320);
         writer.key("height"); writer.unsignedInteger(240);
         writer.key("touch"); writer.boolean(true);
         writer.key("servo"); writer.map(2);
-        writer.key("yaw"); writer.boolean(false);
-        writer.key("pitch"); writer.boolean(false);
+        writer.key("yaw"); writer.boolean(true);
+        writer.key("pitch"); writer.boolean(true);
         writer.key("speaker"); writer.boolean(true);
         writer.key("rgbCount"); writer.unsignedInteger(12);
         writer.key("sdCard"); writer.boolean(packStore_.sdAvailable());
+        writer.key("camera"); writer.boolean(true);
+        writer.key("imu"); writer.boolean(M5.Imu.isEnabled());
+        writer.key("ambientLight"); writer.boolean(environmentSensorReady_);
+        writer.key("proximity"); writer.boolean(environmentSensorReady_);
+        writer.key("headTouch"); writer.boolean(true);
+        writer.key("battery"); writer.boolean(true);
     });
 }
 
-void AgentlingApp::sendInput(const char* type) {
-    protocol_.send(Serial, "input.event", [type](CborWriter& writer) {
-        writer.map(2);
+void AgentlingApp::sendInput(const char* type, const char* source) {
+    protocol_.send(Serial, "input.event", [type, source](CborWriter& writer) {
+        writer.map(3);
         writer.key("type"); writer.text(type);
+        writer.key("source"); writer.text(source);
         writer.key("at"); writer.unsignedInteger(millis());
+    });
+}
+
+void AgentlingApp::sendSensorSnapshot(const String& requestId) {
+    M5.Imu.update();
+    const bool imuAvailable = M5.Imu.isEnabled();
+    const auto imu = M5.Imu.getImuData();
+    const float batteryVoltage = M5StackChan.getBatteryVoltage();
+    const float batteryCurrent = M5StackChan.getBatteryCurrent();
+    const bool batteryAvailable = batteryVoltage > 0;
+    const uint32_t deviceUptimeMs = millis();
+    const auto head = M5StackChan.TouchSensor.getIntensities();
+    uint8_t environment[7]{};
+    const bool environmentAvailable = environmentSensorReady_ &&
+        M5.In_I2C.readRegister(LTR553_ADDRESS, LTR553_ALS_DATA_CH1_0, environment, sizeof(environment), SENSOR_I2C_HZ);
+    const uint16_t channel1 = static_cast<uint16_t>(environment[0] | (environment[1] << 8));
+    const uint16_t channel0 = static_cast<uint16_t>(environment[2] | (environment[3] << 8));
+    const uint16_t proximity = static_cast<uint16_t>(environment[5] | ((environment[6] & 0x07) << 8));
+
+    protocol_.send(Serial, "sensor.snapshot", [&](CborWriter& writer) {
+        writer.map(7);
+        writer.key("requestId"); writer.text(requestId);
+        writer.key("deviceUptimeMs"); writer.unsignedInteger(deviceUptimeMs);
+        writer.key("battery"); writer.map(3);
+        writer.key("voltageV"); batteryAvailable ? writer.number(batteryVoltage) : writer.nullValue();
+        writer.key("currentA"); batteryAvailable ? writer.number(batteryCurrent) : writer.nullValue();
+        writer.key("charging"); batteryAvailable ? writer.boolean(batteryCurrent < -0.005f) : writer.nullValue();
+        writer.key("imu"); writer.map(4);
+        writer.key("available"); writer.boolean(imuAvailable);
+        auto vector = [&](const char* key, const m5::IMU_Class::imu_3d_t& value) {
+            writer.key(key);
+            if (!imuAvailable) { writer.nullValue(); return; }
+            writer.map(3);
+            writer.key("x"); writer.number(value.x);
+            writer.key("y"); writer.number(value.y);
+            writer.key("z"); writer.number(value.z);
+        };
+        vector("accelerationG", imu.accel);
+        vector("gyroscopeDps", imu.gyro);
+        vector("magnetometerUt", imu.mag);
+        writer.key("environment"); writer.map(4);
+        writer.key("available"); writer.boolean(environmentAvailable);
+        writer.key("ambientChannel0"); environmentAvailable ? writer.unsignedInteger(channel0) : writer.nullValue();
+        writer.key("ambientChannel1"); environmentAvailable ? writer.unsignedInteger(channel1) : writer.nullValue();
+        writer.key("proximityRaw"); environmentAvailable ? writer.unsignedInteger(proximity) : writer.nullValue();
+        writer.key("touch"); writer.map(2);
+        writer.key("screenPressed"); writer.boolean(M5.Touch.getCount() > 0);
+        writer.key("headZones"); writer.array(3);
+        for (uint8_t value : head) writer.unsignedInteger(value);
+        writer.key("motion"); writer.map(4);
+        writer.key("servoPower"); writer.boolean(servoPowerEnabled_);
+        writer.key("active"); writer.boolean(servoPhase_ != 0);
+        writer.key("yawDegrees"); servoYawTenths_ == INVALID_SERVO_ANGLE ? writer.nullValue() : writer.number(servoYawTenths_ / 10.0);
+        writer.key("pitchDegrees"); servoPitchTenths_ == INVALID_SERVO_ANGLE ? writer.nullValue() : writer.number(servoPitchTenths_ / 10.0);
+    });
+}
+
+void AgentlingApp::sendCameraResult(const String& requestId, bool ok, const char* error,
+                                    size_t totalBytes, size_t width, size_t height) {
+    protocol_.send(Serial, "camera.result", [&](CborWriter& writer) {
+        writer.map(7);
+        writer.key("requestId"); writer.text(requestId);
+        writer.key("ok"); writer.boolean(ok);
+        writer.key("error"); error ? writer.text(error) : writer.nullValue();
+        writer.key("totalBytes"); writer.unsignedInteger(totalBytes);
+        writer.key("width"); writer.unsignedInteger(width);
+        writer.key("height"); writer.unsignedInteger(height);
+        writer.key("mimeType"); writer.text("image/jpeg");
+    });
+}
+
+void AgentlingApp::sendHardwareResult(const String& requestId, const char* command, bool ok,
+                                      const char* error) {
+    protocol_.send(Serial, "hardware.result", [&](CborWriter& writer) {
+        const bool servo = strcmp(command, "servo") == 0;
+        writer.map(servo ? 5 : 4);
+        writer.key("requestId"); writer.text(requestId);
+        writer.key("command"); writer.text(command);
+        writer.key("ok"); writer.boolean(ok);
+        writer.key("error"); error ? writer.text(error) : writer.nullValue();
+        if (servo) {
+            writer.key("measuredBeforeRelease"); writer.map(2);
+            writer.key("yawDegrees"); servoYawTenths_ == INVALID_SERVO_ANGLE ? writer.nullValue() : writer.number(servoYawTenths_ / 10.0);
+            writer.key("pitchDegrees"); servoPitchTenths_ == INVALID_SERVO_ANGLE ? writer.nullValue() : writer.number(servoPitchTenths_ / 10.0);
+        }
     });
 }
 
@@ -434,6 +776,96 @@ void AgentlingApp::sendError(const String& message) {
         writer.map(1);
         writer.key("message"); writer.text(message);
     });
+}
+
+bool AgentlingApp::beginEnvironmentSensor() {
+    if (!M5.In_I2C.scanID(LTR553_ADDRESS, SENSOR_I2C_HZ)) return false;
+    const bool als = M5.In_I2C.writeRegister8(LTR553_ADDRESS, LTR553_ALS_CONTR, 0x01, SENSOR_I2C_HZ);
+    const bool proximity = M5.In_I2C.writeRegister8(LTR553_ADDRESS, LTR553_PS_CONTR, 0x03, SENSOR_I2C_HZ);
+    return als && proximity;
+}
+
+bool AgentlingApp::captureCamera(const String& requestId) {
+    camera_config_t config{};
+    config.pin_pwdn = -1;
+    config.pin_reset = -1;
+    config.pin_xclk = 2;
+    config.pin_sccb_sda = -1;
+    config.pin_sccb_scl = -1;
+    config.pin_d7 = 47;
+    config.pin_d6 = 48;
+    config.pin_d5 = 16;
+    config.pin_d4 = 15;
+    config.pin_d3 = 42;
+    config.pin_d2 = 41;
+    config.pin_d1 = 40;
+    config.pin_d0 = 39;
+    config.pin_vsync = 46;
+    config.pin_href = 38;
+    config.pin_pclk = 45;
+    config.xclk_freq_hz = 20000000;
+    config.ledc_timer = LEDC_TIMER_0;
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.pixel_format = PIXFORMAT_RGB565;
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 16;
+    config.fb_count = 1;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.sccb_i2c_port = M5.In_I2C.getPort();
+
+    const esp_err_t initialized = esp_camera_init(&config);
+    if (initialized != ESP_OK) {
+        sendCameraResult(requestId, false, "camera initialization failed");
+        return false;
+    }
+
+    camera_fb_t* frame = nullptr;
+    for (int index = 0; index < 3; ++index) {
+        if (frame) esp_camera_fb_return(frame);
+        frame = esp_camera_fb_get();
+        if (!frame) break;
+    }
+    if (!frame) {
+        esp_camera_deinit();
+        sendCameraResult(requestId, false, "camera frame unavailable");
+        return false;
+    }
+
+    uint8_t* jpeg = nullptr;
+    size_t jpegSize = 0;
+    const size_t width = frame->width;
+    const size_t height = frame->height;
+    const bool converted = frame2jpg(frame, 80, &jpeg, &jpegSize);
+    esp_camera_fb_return(frame);
+    esp_camera_deinit();
+    if (!converted || !jpeg || jpegSize == 0 || jpegSize > 1024 * 1024) {
+        if (jpeg) free(jpeg);
+        sendCameraResult(requestId, false, "JPEG conversion failed");
+        return false;
+    }
+
+    for (size_t offset = 0; offset < jpegSize; offset += CAMERA_CHUNK_BYTES) {
+        const size_t size = std::min(CAMERA_CHUNK_BYTES, jpegSize - offset);
+        protocol_.send(Serial, "camera.chunk", [&](CborWriter& writer) {
+            writer.map(3);
+            writer.key("requestId"); writer.text(requestId);
+            writer.key("offset"); writer.unsignedInteger(offset);
+            writer.key("data"); writer.bytes(jpeg + offset, size);
+        });
+        delay(2);
+    }
+    sendCameraResult(requestId, true, nullptr, jpegSize, width, height);
+    free(jpeg);
+    return true;
+}
+
+void AgentlingApp::finishCameraConsent() {
+    cameraConsentPending_ = false;
+    cameraCapturing_ = false;
+    cameraConsentDeadline_ = 0;
+    cameraRequestId_ = "";
+    renderDirty_ = true;
 }
 
 LovyanGFX& AgentlingApp::renderTarget() {
@@ -479,8 +911,29 @@ void AgentlingApp::render() {
         display.setTextDatum(middle_center);
         display.drawString("HOST OFF", 278, 14);
     }
+    if (cameraConsentPending_ || cameraCapturing_) renderCameraConsent();
     display.endWrite();
     if (canvasReady_) canvas_.pushSprite(0, 0);
+}
+
+void AgentlingApp::renderCameraConsent() {
+    LovyanGFX& display = renderTarget();
+    display.fillRoundRect(8, 35, 304, 194, 14, display.color565(14, 20, 31));
+    display.drawRoundRect(8, 35, 304, 194, 14, display.color565(255, 184, 77));
+    display.setTextDatum(middle_center);
+    display.setTextColor(TFT_WHITE);
+    display.setFont(&fonts::efontCN_16);
+    display.drawString(cameraCapturing_ ? "正在拍照" : "允许拍摄一张照片？", 160, 78);
+    display.setFont(&fonts::efontCN_12);
+    display.setTextColor(display.color565(174, 187, 205));
+    display.drawString(cameraCapturing_ ? "请保持设备稳定" : "照片仅保存到本机临时目录", 160, 111);
+    if (cameraCapturing_) return;
+    display.fillRoundRect(18, 169, 132, 44, 10, display.color565(76, 86, 104));
+    display.fillRoundRect(170, 169, 132, 44, 10, display.color565(43, 150, 103));
+    display.setFont(&fonts::efontCN_16);
+    display.setTextColor(TFT_WHITE);
+    display.drawString("拒绝", 84, 191);
+    display.drawString("允许", 236, 191);
 }
 
 void AgentlingApp::renderConfigured() {
@@ -768,16 +1221,21 @@ void AgentlingApp::setExpression(const String& name) {
 }
 
 void AgentlingApp::applyMotion(const String& name) {
-    // Deliberate no-op for firmware 0.2.x. Keep the method and pack field so a
-    // later opt-in motion release does not require a protocol change.
+    // Pack-driven autonomous motion remains disabled. Only the bounded direct
+    // MCP command below may temporarily power the servos.
     (void)name;
-    M5StackChan.Motion.setTorqueEnabled(false);
-    M5StackChan.setServoPowerEnabled(false);
 }
 
 void AgentlingApp::applySound(const String& name) {
     JsonObjectConst sound = pack_["sounds"][name].as<JsonObjectConst>();
     if (sound.isNull()) return;
+    float volume = constrain(sound["volume"] | 0.3f, 0.0f, 1.0f);
+    playSoundPreset(name, static_cast<uint8_t>(round(volume * 100.0f)), 8000);
+}
+
+bool AgentlingApp::playSoundPreset(const String& name, uint8_t volumePercent, uint32_t maxDurationMs) {
+    JsonObjectConst sound = pack_["sounds"][name].as<JsonObjectConst>();
+    if (sound.isNull()) return false;
     melodyCount_ = 0;
     melodyIndex_ = 0;
     if (sound["notes"].is<JsonArrayConst>()) {
@@ -790,22 +1248,32 @@ void AgentlingApp::applySound(const String& name) {
         if (frequency > 0) melodyNotes_[melodyCount_++] = static_cast<uint16_t>(frequency);
     }
     melodyNoteMs_ = static_cast<uint16_t>(constrain(sound["durationMs"] | (sound["noteMs"] | 90), 20, 1000));
-    float volume = constrain(sound["volume"] | 0.3f, 0.0f, 1.0f);
-    M5.Speaker.setVolume(static_cast<uint8_t>(round(volume * 255.0f)));
+    M5.Speaker.setVolume(static_cast<uint8_t>(round(constrain(volumePercent, 0, 50) * 255.0f / 100.0f)));
+    soundStopAt_ = millis() + constrain(maxDurationMs, 100UL, 8000UL);
     melodyNextAt_ = millis();
     updateSound();
+    return melodyCount_ > 0;
 }
 
 void AgentlingApp::updateSound() {
+    if (soundStopAt_ && static_cast<int32_t>(millis() - soundStopAt_) >= 0) {
+        melodyIndex_ = melodyCount_;
+        soundStopAt_ = 0;
+        M5.Speaker.stop();
+        return;
+    }
     if (melodyIndex_ >= melodyCount_ || static_cast<int32_t>(millis() - melodyNextAt_) < 0) return;
     uint16_t note = melodyNotes_[melodyIndex_++];
-    if (note > 0) M5.Speaker.tone(note, melodyNoteMs_);
+    uint32_t remaining = soundStopAt_ ? soundStopAt_ - millis() : melodyNoteMs_;
+    uint16_t duration = static_cast<uint16_t>(std::min<uint32_t>(melodyNoteMs_, remaining));
+    if (note > 0 && duration > 0) M5.Speaker.tone(note, duration);
     melodyNextAt_ = millis() + melodyNoteMs_ + 18;
 }
 
 void AgentlingApp::applyLight(const String& name) {
     JsonObjectConst light = pack_["lights"][name].as<JsonObjectConst>();
     if (light.isNull()) return;
+    lightOverrideActive_ = false;
     lightColor_ = parseColor(light["color"] | "#000000", 0);
     lightBrightness_ = static_cast<uint8_t>(constrain(light["brightness"] | 50, 0, 100));
     lightMode_ = light["mode"] | "solid";
@@ -815,8 +1283,36 @@ void AgentlingApp::applyLight(const String& name) {
     updateLight();
 }
 
+void AgentlingApp::setDirectLight(uint32_t color, uint8_t brightness, const String& mode,
+                                  uint32_t periodMs, uint32_t ttlMs) {
+    if (!lightOverrideActive_) {
+        savedLightMode_ = lightMode_;
+        savedLightColor_ = lightColor_;
+        savedLightBrightness_ = lightBrightness_;
+        savedLightPeriodMs_ = lightPeriodMs_;
+    }
+    lightOverrideActive_ = true;
+    lightOverrideDeadline_ = millis() + ttlMs;
+    lightColor_ = color;
+    lightBrightness_ = brightness;
+    lightMode_ = mode;
+    lightPeriodMs_ = periodMs;
+    lightStartedAt_ = millis();
+    lastLightUpdateAt_ = 0;
+    updateLight();
+}
+
 void AgentlingApp::updateLight() {
     uint32_t now = millis();
+    if (lightOverrideActive_ && static_cast<int32_t>(now - lightOverrideDeadline_) >= 0) {
+        lightOverrideActive_ = false;
+        lightMode_ = savedLightMode_;
+        lightColor_ = savedLightColor_;
+        lightBrightness_ = savedLightBrightness_;
+        lightPeriodMs_ = savedLightPeriodMs_;
+        lightStartedAt_ = now;
+        lastLightUpdateAt_ = 0;
+    }
     if (lightMode_ == "solid" && lastLightUpdateAt_) return;
     if (lastLightUpdateAt_ && now - lastLightUpdateAt_ < 50) return;
     lastLightUpdateAt_ = now;
@@ -844,6 +1340,61 @@ void AgentlingApp::updateLight() {
         M5StackChan.setRgbColor(index + 6, pairRed, pairGreen, pairBlue);
     }
     M5StackChan.refreshRgb();
+}
+
+void AgentlingApp::updateServoMotion() {
+    if (servoPhase_ == 0) return;
+    if (*M5StackChan.Motion.safetyError()) {
+        finishServoMotion(false, M5StackChan.Motion.safetyError());
+        return;
+    }
+    const uint32_t now = millis();
+    if (static_cast<int32_t>(now - servoDeadline_) >= 0) {
+        finishServoMotion(false, "servo movement timeout");
+        return;
+    }
+    if (servoLastStepAt_ && now - servoLastStepAt_ < 100) return;
+    servoLastStepAt_ = now;
+    const auto actual = M5StackChan.Motion.getCurrentAngles();
+    if (actual.x == INVALID_SERVO_ANGLE || actual.y == INVALID_SERVO_ANGLE) {
+        finishServoMotion(false, "position feedback lost");
+        return;
+    }
+    servoYawTenths_ = actual.x;
+    servoPitchTenths_ = actual.y;
+    // Match the official completion semantics. Small position errors remain
+    // possible; return the measured endpoint rather than repeatedly chasing it.
+    if (M5StackChan.Motion.isMoving()) {
+        servoPhase_ = 1;
+        return;
+    }
+    if (servoPhase_ == 1) {
+        servoPhase_ = 2;
+        servoNextAt_ = now + servoHoldMs_;
+    } else if (static_cast<int32_t>(now - servoNextAt_) >= 0) {
+        // Release at the destination, never enqueue an automatic home.
+        finishServoMotion(true);
+    }
+}
+
+void AgentlingApp::finishServoMotion(bool ok, const char* error) {
+    const String requestId = servoRequestId_;
+    const char* command = "servo";
+    M5StackChan.Motion.setTorqueEnabled(false);
+    M5StackChan.setServoPowerEnabled(false);
+    M5StackChan.Motion.setAutoTorqueReleaseEnabled(true);
+    servoPowerEnabled_ = false;
+    servoPhase_ = 0;
+    servoTargetYawTenths_ = 0;
+    servoTargetPitchTenths_ = 0;
+    servoLastStepAt_ = 0;
+    servoNextAt_ = 0;
+    servoDeadline_ = 0;
+    servoRequestId_ = "";
+    lastServoCompletedAt_ = millis();
+    sendHardwareResult(requestId, command, ok, error);
+    servoYawTenths_ = INVALID_SERVO_ANGLE;
+    servoPitchTenths_ = INVALID_SERVO_ANGLE;
 }
 
 void AgentlingApp::updateVisual() {
@@ -916,12 +1467,55 @@ void AgentlingApp::updateTouch() {
         touchStartY_ = detail.y;
     } else if (touchDown_ && detail.wasReleased()) {
         touchDown_ = false;
+        if (cameraConsentPending_) {
+            if (touchStartY_ >= 160 && touchStartX_ < 160) {
+                const String requestId = cameraRequestId_;
+                sendCameraResult(requestId, false, "user rejected camera capture");
+                finishCameraConsent();
+            } else if (touchStartY_ >= 160 && touchStartX_ >= 160) {
+                const String requestId = cameraRequestId_;
+                cameraConsentPending_ = false;
+                cameraCapturing_ = true;
+                renderDirty_ = true;
+                render();
+                captureCamera(requestId);
+                finishCameraConsent();
+            }
+            return;
+        }
         int dx = detail.x - touchStartX_;
         if (dx > 40) sendInput("swipe_right");
         else if (dx < -40) sendInput("swipe_left");
         else if (touchStartY_ > 185) sendInput("task_next");
         else sendInput("tap");
     }
+}
+
+void AgentlingApp::updateHeadTouch() {
+    auto& touch = M5StackChan.TouchSensor;
+    if (touch.wasClicked()) sendInput("head_touch", "head");
+    if (touch.wasSwipedForward()) sendInput("head_swipe_forward", "head");
+    if (touch.wasSwipedBackward()) sendInput("head_swipe_backward", "head");
+}
+
+void AgentlingApp::updatePhysicalSensors() {
+    if (millis() - lastPhysicalSensorAt_ < 50) return;
+    lastPhysicalSensorAt_ = millis();
+    if (!M5.Imu.isEnabled() || !M5.Imu.update()) return;
+    const auto imu = M5.Imu.getImuData();
+    const float magnitude = sqrtf(imu.accel.x * imu.accel.x + imu.accel.y * imu.accel.y + imu.accel.z * imu.accel.z);
+    if (magnitude > 2.2f && millis() - lastShakeAt_ > 2000) {
+        lastShakeAt_ = millis();
+        sendInput("shake", "imu");
+    }
+}
+
+void AgentlingApp::updateCameraConsent() {
+    if (!cameraConsentPending_) return;
+    if (static_cast<int32_t>(millis() - cameraConsentDeadline_) < 0) return;
+    const String requestId = cameraRequestId_;
+    sendCameraResult(requestId, false, "camera confirmation timed out");
+    finishCameraConsent();
 }
 
 void AgentlingApp::updateIdle() {

@@ -22,9 +22,14 @@ Agentling StackChan 是一个面向 M5Stack StackChan K151/CoreS3 的可配置�
 - 可拖动布局编辑、角色包导入/校验、资源清单、SHA-256 校验和原子同步。
 - STDIO MCP：`agentling_show`、`agentling_progress`、`agentling_clear`。表达必须带 TTL，
   Agent 真实事件会立即清除表达，失败和等待批准始终优先。
+- 硬件 MCP：可读取电池、IMU、环境光/接近、屏幕和头部触摸快照，等待触摸/摇晃事件；
+  单次拍照必须在真机 15 秒确认界面点击“允许”，JPEG 仅保存到本机私有临时文件。
+- 直接硬件 MCP：限时设置 12 颗 RGB 灯的颜色/亮度/呼吸/追逐，限音量和时长播放
+  角色包预设音；云台使用官方动画执行有界单次动作，到达目标后释放扭矩并断电，不自动回中。
 - Open-Meteo 天气 Provider，仅使用用户填写的城市经纬度，不做 IP 定位。
 - CoreS3 固件：CBOR + COBS + CRC32、序号/累计 ACK、断线标记、触摸切任务、序列帧/声音/
-  同步灯光调度、云台断电、microSD 优先的事务更新及内置救援界面。
+  同步灯光调度、传感器快照、物理事件、授权后单次拍照、云台断电、microSD 优先的事务更新
+  及内置救援界面。
 - 固件诊断会返回当前微动画偏移、缩放和相位，便于在没有摄像头时确认真机动画引擎持续运行。
 - 状态事件立即推送，内部裁决周期 250 ms、设备心跳 1 秒；额度每分钟主动校准，同时继续
   接收 App Server 的即时更新。这些读取不调用模型、不消耗 token。
@@ -128,7 +133,8 @@ Codex Hooks ────────┤
 Codex App Server ───┼──> desktop runtime ──USB Serial──> StackChan firmware
 Clock / Weather ────┘          │                            │
 MCP temporary cues ────────────┘                            ├─ display/touch
-                                                            ├─ servos off
+                                                            ├─ sensors/camera
+                                                            ├─ bounded servos
                                                             ├─ speaker
                                                             └─ 12 RGB LEDs
 ```

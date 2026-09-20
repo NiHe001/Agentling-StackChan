@@ -42,6 +42,7 @@ public:
     void text(const char* value);
     void bytes(const uint8_t* value, size_t size);
     void unsignedInteger(uint64_t value);
+    void number(double value);
     void boolean(bool value);
     void nullValue();
     void key(const char* value) { text(value); }
