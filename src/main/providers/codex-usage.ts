@@ -129,6 +129,7 @@ class JsonRpcLineClient extends EventEmitter {
 }
 
 export class CodexUsageProvider extends EventEmitter implements DataProvider<UsageSnapshot> {
+  private static readonly WORKING_REFRESH_MS = 15_000;
   readonly id = "codex-usage";
   private readonly store = new UsageStore();
   private readonly alertTracker = new UsageAlertTracker();
@@ -136,6 +137,9 @@ export class CodexUsageProvider extends EventEmitter implements DataProvider<Usa
   private aliases: Record<string, UsageAliasConfig> = DEFAULT_USAGE_ALIASES;
   private client: JsonRpcLineClient | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
+  private refreshInFlight: Promise<UsageSnapshot> | null = null;
+  private working = false;
+  private started = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private stopping = false;
   private reconnectDelay = 1_000;
@@ -162,12 +166,14 @@ export class CodexUsageProvider extends EventEmitter implements DataProvider<Usa
       this.publish();
       this.scheduleReconnect();
     });
-    this.pollTimer = setInterval(() => void this.refresh(), this.config.refreshMs);
-    this.pollTimer.unref();
+    if (this.client) await this.refresh();
+    this.started = true;
+    this.schedulePolling();
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.started = false;
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.pollTimer = null;
@@ -177,6 +183,38 @@ export class CodexUsageProvider extends EventEmitter implements DataProvider<Usa
   }
 
   async refresh(): Promise<UsageSnapshot> {
+    // A manual refresh, poll, and work-state transition may coincide. Share
+    // one read so the app server is not sent overlapping rate-limit requests.
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const request = this.refreshOnce();
+    this.refreshInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (this.refreshInFlight === request) this.refreshInFlight = null;
+    }
+  }
+
+  setWorking(working: boolean): void {
+    if (this.working === working) return;
+    this.working = working;
+    if (!this.started) return;
+    this.schedulePolling();
+    // The first work update should not wait for the next poll interval.
+    if (working) void this.refresh();
+  }
+
+  private schedulePolling(): void {
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    // A custom idle interval shorter than 15 seconds remains authoritative.
+    const interval = this.working
+      ? Math.min(this.config.refreshMs, CodexUsageProvider.WORKING_REFRESH_MS)
+      : this.config.refreshMs;
+    this.pollTimer = setInterval(() => void this.refresh(), interval);
+    this.pollTimer.unref();
+  }
+
+  private async refreshOnce(): Promise<UsageSnapshot> {
     try {
       if (!this.client) await this.connect();
       const result = (await this.client?.request("account/rateLimits/read")) as RawRateLimitsResponse;
@@ -220,14 +258,13 @@ export class CodexUsageProvider extends EventEmitter implements DataProvider<Usa
     await client.start();
     this.client = client;
     this.reconnectDelay = 1_000;
-    await this.refresh();
   }
 
   private scheduleReconnect(): void {
     if (this.stopping || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      void this.connect().catch((error) => {
+      void this.connect().then(() => this.refresh()).catch((error) => {
         this.store.fail(error);
         this.publish();
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, 60_000);

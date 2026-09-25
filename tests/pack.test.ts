@@ -39,3 +39,19 @@ describe("Byte Otter character pack", () => {
     expect(pack.events["approval.resolved"]).toBe("focus");
   });
 });
+
+describe("Luma virtual character pack", () => {
+  it("compiles distinct task states for the device screen", async () => {
+    const pack = await compilePack(path.resolve("packs/luma"));
+    expect(pack.manifest.id).toBe("agentling.luma");
+    expect(pack.files.filter((file) => file.path.startsWith("assets/sprites/"))).toHaveLength(9);
+    expect(pack.visuals.working?.asset).toBe("assets/sprites/working.png");
+    expect(pack.visuals.waiting_approval?.asset).toBe("assets/sprites/approval.png");
+    expect(pack.visuals.waiting?.asset).toBe("assets/sprites/needs-input.png");
+    expect(pack.events["input.requested"]).toBe("input_attention");
+    expect(pack.behaviors.input_attention?.steps[0]?.expression).toBe("needs_input");
+    expect(pack.visuals.failed?.asset).toBe("assets/sprites/failed.png");
+    expect(pack.visuals.offline?.asset).toBe("assets/sprites/offline.png");
+    expect(Object.values(pack.behaviors).flatMap((behavior) => behavior.steps).every((step) => !step.motion)).toBe(true);
+  });
+});

@@ -42,6 +42,17 @@ describe("StateArbiter", () => {
     expect(arbiter.tick(5_001).tasks[0]?.state).toBe("idle");
   });
 
+  it("returns to another working task after a completion or failure is shown", () => {
+    const arbiter = new StateArbiter();
+    arbiter.apply(event("turn.started", "long-running", 1_000));
+    arbiter.apply(event("turn.completed", "short", 2_000));
+    expect(arbiter.snapshot(2_001).aggregateState).toBe("working");
+    arbiter.apply(event("turn.failed", "failed", 3_000));
+    expect(arbiter.snapshot(3_001)).toMatchObject({ aggregateState: "failed", activeTaskId: "failed" });
+    expect(arbiter.tick(11_001)).toMatchObject({ aggregateState: "working", activeTaskId: "long-running" });
+    expect(arbiter.snapshot(11_001).reports[0]?.state).toBe("failed");
+  });
+
   it("keeps a newest-first task report timeline with useful tool labels", () => {
     const arbiter = new StateArbiter();
     arbiter.apply({ ...event("turn.started", "task", 1_000), title: "角色包升级" });

@@ -89,6 +89,7 @@ export class AgentlingRuntime extends EventEmitter {
       this.publish();
     });
     this.usageProvider.on("alert", (level: string, window: { id: string }) => {
+      if (["failed", "waiting_approval", "offline"].includes(this.arbiter.snapshot().aggregateState)) return;
       const event = `usage.${level}`;
       this.sendBehavior(event, { windowId: window.id });
     });
@@ -219,6 +220,24 @@ export class AgentlingRuntime extends EventEmitter {
     try { await this.device.syncPack(this.pack); } finally { this.syncingPack = false; }
   }
 
+  async applyPack(directory: string): Promise<CompiledPack> {
+    if (this.syncingPack) throw new Error("A character pack sync is already running");
+    this.syncingPack = true;
+    try {
+      const pack = await compilePack(directory);
+      // Keep the desktop preview on the old pack until the device confirms
+      // activation; a failed transfer must not create two different views.
+      await this.device.syncPack(pack);
+      this.pack = pack;
+      this.usageProvider.setAliases(pack.ui.usage_aliases);
+      this.publish();
+      this.sendFullSnapshot();
+      return pack;
+    } finally {
+      this.syncingPack = false;
+    }
+  }
+
   private syncingPack = false;
 
   async readPackAsset(relativePath: string): Promise<string | null> {
@@ -233,16 +252,24 @@ export class AgentlingRuntime extends EventEmitter {
 
   private handleCanonicalEvent(event: CanonicalEvent): void {
     const snapshot = this.arbiter.apply(event);
+    this.usageProvider.setWorking(snapshot.tasks.some((task) => task.state === "working"));
+    // Send lifecycle truth and clear any old overlay before its transient cue.
+    // The device can then restore the latest state when that cue finishes.
+    this.publishAgent();
+    this.publishOverlay();
     if (event.type === "session.closed") {
       // Closing one task is not a desktop disconnect. If no other task needs
       // attention, return to the ordinary idle character; otherwise preserve
       // the currently authoritative task state.
       if (snapshot.aggregateState === "idle") this.sendBehavior("session.idle", event.payload);
-    } else {
+    } else if (
+      // Another task's celebration or a quota notice must not cover a task
+      // waiting for approval, a failure, or the offline screen.
+      !["failed", "waiting_approval", "offline"].includes(snapshot.aggregateState) ||
+      event.sessionId === snapshot.activeTaskId
+    ) {
       this.sendBehavior(event.type, event.payload);
     }
-    this.publishAgent();
-    this.publishOverlay();
   }
 
   private sendBehavior(event: string, payload?: Record<string, unknown>): void {

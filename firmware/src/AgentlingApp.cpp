@@ -94,6 +94,7 @@ void AgentlingApp::begin() {
 
 void AgentlingApp::update() {
     M5StackChan.update();
+    if (updatePowerButton()) return;
     protocol_.poll(Serial, [this](const EnvelopeView& envelope) {
         handleEnvelope(envelope);
         protocol_.send(Serial, "ack", [&envelope](CborWriter& writer) {
@@ -145,6 +146,10 @@ void AgentlingApp::handleEnvelope(const EnvelopeView& envelope) {
     else if (envelope.type == "pack.chunk") parsePackChunk(payload);
     else if (envelope.type == "pack.commit") {
         parsePackCommit(payload);
+        renderDirty_ = true;
+    }
+    else if (envelope.type == "pack.activate") {
+        parsePackActivate(payload);
         renderDirty_ = true;
     }
     else if (envelope.type == "sensor.request") parseSensorRequest(payload);
@@ -216,6 +221,10 @@ bool AgentlingApp::parseAgentSnapshot(CborReader& reader) {
     if (state_ == "idle") {
         if (!idleStartedAt_) idleStartedAt_ = millis();
     } else idleStartedAt_ = 0;
+    if (previousState != state_) {
+        behaviorName_ = "";
+        if (!overlayActive_) restoreStateBehavior();
+    }
     return previousState != state_ ||
         previousActiveTaskId != activeTaskId_ ||
         previousActiveTaskTitle != activeTaskTitle_ ||
@@ -313,6 +322,7 @@ void AgentlingApp::parseActionCue(CborReader& reader) {
     if (!reader.readMapSize(fields)) return;
     String behavior;
     bool overlaySeen = false;
+    String overlayScene;
     for (size_t index = 0; index < fields; ++index) {
         String key;
         if (!reader.readText(key)) return;
@@ -320,17 +330,18 @@ void AgentlingApp::parseActionCue(CborReader& reader) {
         else if (key == "overlay") {
             overlaySeen = true;
             if (reader.peekMajor() == 7 && reader.readNull()) {
+                overlayActive_ = false;
                 overlayText_ = "";
             } else {
+                overlayActive_ = true;
+                overlayText_ = "";
                 size_t overlayFields;
                 if (!reader.readMapSize(overlayFields)) return;
                 for (size_t field = 0; field < overlayFields; ++field) {
                     String overlayKey;
                     reader.readText(overlayKey);
                     if (overlayKey == "scene") {
-                        String scene;
-                        reader.readText(scene);
-                        setExpression(scene);
+                        reader.readText(overlayScene);
                     }
                     else if (overlayKey == "text") overlayText_ = readTextOrEmpty(reader);
                     else reader.skipValue();
@@ -339,19 +350,24 @@ void AgentlingApp::parseActionCue(CborReader& reader) {
         } else if (!reader.skipValue()) return;
     }
     if (!behavior.isEmpty()) startBehavior(behavior);
-    if (overlaySeen && overlayText_.isEmpty()) setExpression(expressionForState());
+    if (overlaySeen) {
+        if (overlayActive_) setExpression(overlayScene);
+        else if (behaviorName_.isEmpty()) restoreStateBehavior();
+        else setExpression(expressionForState());
+    }
 }
 
 void AgentlingApp::parsePackManifest(CborReader& reader) {
     size_t fields;
     if (!reader.readMapSize(fields)) return;
-    String id, version;
+    String id, version, digest;
     std::vector<ExpectedFile> files;
     for (size_t index = 0; index < fields; ++index) {
         String key;
         reader.readText(key);
         if (key == "id") reader.readText(id);
         else if (key == "version") reader.readText(version);
+        else if (key == "digest") reader.readText(digest);
         else if (key == "files") {
             size_t count;
             if (!reader.readArraySize(count)) return;
@@ -375,7 +391,7 @@ void AgentlingApp::parsePackManifest(CborReader& reader) {
             }
         } else reader.skipValue();
     }
-    if (!packStore_.beginTransaction(id, version, files)) sendError(packStore_.error());
+    if (!packStore_.beginTransaction(id, version, digest, files)) sendError(packStore_.error());
 }
 
 void AgentlingApp::parsePackChunk(CborReader& reader) {
@@ -414,6 +430,26 @@ void AgentlingApp::parsePackCommit(CborReader& reader) {
     hasPack_ = packStore_.loadRuntime(pack_);
     startBehavior("wake");
     if (!hasPack_) sendError(packStore_.error());
+}
+
+void AgentlingApp::parsePackActivate(CborReader& reader) {
+    size_t fields;
+    if (!reader.readMapSize(fields)) return;
+    String id, version, digest;
+    for (size_t index = 0; index < fields; ++index) {
+        String key;
+        if (!reader.readText(key)) return;
+        if (key == "id") reader.readText(id);
+        else if (key == "version") reader.readText(version);
+        else if (key == "digest") reader.readText(digest);
+        else if (!reader.skipValue()) return;
+    }
+    // Cache misses are normal: the desktop then sends the pack once.
+    if (!packStore_.activateCached(id, version, digest)) return;
+    pack_.clear();
+    hasPack_ = packStore_.loadRuntime(pack_);
+    if (hasPack_) startBehavior("wake");
+    else sendError(packStore_.error());
 }
 
 void AgentlingApp::parseSensorRequest(CborReader& reader) {
@@ -630,7 +666,7 @@ void AgentlingApp::parseServoInspectCommand(CborReader& reader) {
 void AgentlingApp::sendHello() {
     protocol_.send(Serial, "device.hello", [this](CborWriter& writer) {
         writer.map(4);
-        writer.key("diagnostics"); writer.map(22);
+        writer.key("diagnostics"); writer.map(23);
         writer.key("visualCount"); writer.unsignedInteger(pack_["visuals"].size());
         writer.key("visualRenderer"); writer.text(pack_["visuals"][expression_]["renderer"] | "missing");
         writer.key("visualFrame"); writer.unsignedInteger(visualFrameIndex_);
@@ -641,6 +677,7 @@ void AgentlingApp::sendHello() {
         writer.key("packLoaded"); writer.boolean(hasPack_);
         writer.key("packId"); writer.text(pack_["manifest"]["id"] | "");
         writer.key("packVersion"); writer.text(pack_["manifest"]["version"] | "");
+        writer.key("packDigest"); writer.text(packStore_.activeDigest());
         writer.key("storageBackend"); writer.text(packStore_.storageName());
         writer.key("sdMounted"); writer.boolean(packStore_.sdAvailable());
         writer.key("storageTotal"); writer.unsignedInteger(packStore_.totalBytes());
@@ -654,7 +691,7 @@ void AgentlingApp::sendHello() {
         writer.key("activeTaskTitle"); writer.text(activeTaskTitle_);
         writer.key("activeTaskReport"); writer.text(activeTaskReport_);
         writer.key("localTime"); writer.text(localTime_);
-        writer.key("firmwareVersion"); writer.text("0.7.0");
+        writer.key("firmwareVersion"); writer.text("0.8.0");
         writer.key("protocolVersion"); writer.unsignedInteger(AGENTLING_PROTOCOL_VERSION);
         writer.key("capabilities");
         writer.map(11);
@@ -1195,13 +1232,52 @@ void AgentlingApp::updateBehavior() {
         if (loop && elapsed >= lastAt + 500) {
             behaviorStep_ = 0;
             behaviorStartedAt_ = millis();
-        } else if (!loop) behaviorName_ = "";
+        } else if (!loop && elapsed >= lastAt + 850) {
+            // Let the final cue frame remain visible briefly, then return to
+            // the latest aggregate state rather than the event's old state.
+            behaviorName_ = "";
+            restoreStateBehavior();
+        }
+    }
+}
+
+void AgentlingApp::restoreStateBehavior() {
+    if (!overlayActive_) {
+        if (!overlayText_.isEmpty()) {
+            overlayText_ = "";
+            renderDirty_ = true;
+        }
+        setExpression(expressionForState());
+    }
+    if (!hasPack_) return;
+    const char* event = nullptr;
+    if (state_ == "working") event = "turn.started";
+    else if (state_ == "idle") event = "session.idle";
+    else if (state_ == "waiting_approval") event = "approval.requested";
+    else if (state_ == "needs_input") event = "input.requested";
+    else if (state_ == "offline") event = "session.closed";
+    if (!event) return;
+    const char* name = pack_["events"][event] | nullptr;
+    if (!name && state_ == "needs_input") name = pack_["events"]["approval.requested"] | nullptr;
+    if (!name) return;
+    JsonObjectConst behavior = pack_["behaviors"][name].as<JsonObjectConst>();
+    if (behavior.isNull()) return;
+    // Restart looping baseline behaviors. A one-shot baseline contributes
+    // its light only; replaying it here would create an endless cue cycle.
+    if (behavior["loop"] | false) {
+        lastBehaviorName_ = "";
+        startBehavior(name);
+    } else {
+        JsonArrayConst steps = behavior["steps"].as<JsonArrayConst>();
+        if (steps.size() && steps[0]["light"].is<const char*>()) {
+            applyLight(steps[0]["light"].as<const char*>());
+        }
     }
 }
 
 void AgentlingApp::applyBehaviorStep(JsonObjectConst step) {
-    if (step["expression"].is<const char*>()) setExpression(step["expression"].as<const char*>());
-    if (step["text"].is<const char*>()) overlayText_ = step["text"].as<const char*>();
+    if (!overlayActive_ && step["expression"].is<const char*>()) setExpression(step["expression"].as<const char*>());
+    if (!overlayActive_ && step["text"].is<const char*>()) overlayText_ = step["text"].as<const char*>();
     if (step["motion"].is<const char*>()) applyMotion(step["motion"].as<const char*>());
     if (step["sound"].is<const char*>()) applySound(step["sound"].as<const char*>());
     if (step["light"].is<const char*>()) applyLight(step["light"].as<const char*>());
@@ -1300,6 +1376,28 @@ void AgentlingApp::setDirectLight(uint32_t color, uint8_t brightness, const Stri
     lightStartedAt_ = millis();
     lastLightUpdateAt_ = 0;
     updateLight();
+}
+
+bool AgentlingApp::updatePowerButton() {
+    if (shuttingDown_) return true;
+    if (!M5.BtnPWR.wasHold()) return false;
+
+    // The CoreS3 PMIC turns off the main unit, but the StackChan body's RGB
+    // controller can retain its last frame. Clear external outputs before the
+    // main controller loses power so shutdown looks and behaves atomically.
+    shuttingDown_ = true;
+    lightOverrideActive_ = false;
+    lightBrightness_ = 0;
+    lastLightUpdateAt_ = 0;
+    M5StackChan.showRgbColor(0, 0, 0);
+    M5StackChan.Motion.setTorqueEnabled(false);
+    M5StackChan.setServoPowerEnabled(false);
+    servoPowerEnabled_ = false;
+    M5.Speaker.stop();
+    M5.Display.setBrightness(0);
+    delay(50);
+    M5.Power.powerOff();
+    return true;
 }
 
 void AgentlingApp::updateLight() {

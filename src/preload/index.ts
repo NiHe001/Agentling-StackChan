@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopSnapshot, UiConfig } from "../core/types";
 import type { SerialPortInfo } from "../main/services/device";
+import type { PackOption } from "../main/pack-library";
 
 const api = {
   getSnapshot: (): Promise<DesktopSnapshot> => ipcRenderer.invoke("agentling:snapshot:get"),
@@ -13,6 +14,9 @@ const api = {
   connectDevice: (portPath: string) => ipcRenderer.invoke("agentling:device:connect", portPath),
   disconnectDevice: () => ipcRenderer.invoke("agentling:device:disconnect"),
   openPack: () => ipcRenderer.invoke("agentling:pack:open"),
+  listPacks: (): Promise<PackOption[]> => ipcRenderer.invoke("agentling:pack:list"),
+  addPack: (): Promise<PackOption | null> => ipcRenderer.invoke("agentling:pack:add"),
+  applyPack: (directory: string): Promise<DesktopSnapshot["pack"]> => ipcRenderer.invoke("agentling:pack:apply", directory),
   saveUi: (ui: UiConfig) => ipcRenderer.invoke("agentling:pack:save-ui", ui),
   syncPack: () => ipcRenderer.invoke("agentling:pack:sync"),
   getPackAsset: (relativePath: string): Promise<string | null> => ipcRenderer.invoke("agentling:pack:asset", relativePath),

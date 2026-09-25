@@ -12,7 +12,7 @@ codex:
   enabled: true
   # binary: /Applications/ChatGPT.app/Contents/Resources/codex
   # Local App Server read only; it does not call a model or consume tokens.
-  refreshMs: 60000
+  refreshMs: 60000 # 空闲轮询间隔；工作时最多每 15 秒读取一次
 
 weather:
   enabled: false

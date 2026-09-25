@@ -131,7 +131,7 @@ for (const action of ["validate", "load"] as const) server.registerTool(`agentli
 }, async ({ directory }) => ({ content: [{ type: "text", text: JSON.stringify(await call(`/v1/pack/${action}`, { directory })) }] }));
 
 server.registerTool("agentling_connect", { description: "Connect to an available serial port.", inputSchema: { path: z.string().min(1) } }, async ({ path }) => ({ content: [{ type: "text", text: JSON.stringify(await call("/v1/device/connect", { path })) }] }));
-for (const [name, route] of [["disconnect", "/v1/device/disconnect"], ["pack_sync", "/v1/pack/sync"]] as const) server.registerTool(`agentling_${name}`, { description: name === "disconnect" ? "Disconnect the robot." : "Atomically sync the selected pack to internal flash and return device diagnostics. May take up to two minutes.", inputSchema: {} }, async () => ({ content: [{ type: "text", text: JSON.stringify(await call(route, {})) }] }));
+for (const [name, route] of [["disconnect", "/v1/device/disconnect"], ["pack_sync", "/v1/pack/sync"]] as const) server.registerTool(`agentling_${name}`, { description: name === "disconnect" ? "Disconnect the robot." : "Activate a cached character pack on microSD, or transfer and verify it when new or changed; return device diagnostics. First transfer may take up to two minutes.", inputSchema: {} }, async () => ({ content: [{ type: "text", text: JSON.stringify(await call(route, {})) }] }));
 
 server.registerTool(
   "agentling_show",

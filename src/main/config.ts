@@ -29,6 +29,7 @@ export interface HostConfig {
     baudRate: number;
   };
   packDir?: string;
+  packDirs?: string[];
 }
 
 export const DEFAULT_HOST_CONFIG: HostConfig = {
@@ -56,6 +57,7 @@ export async function loadHostConfig(file: string): Promise<HostConfig> {
       weather: { ...DEFAULT_HOST_CONFIG.weather, ...value.weather },
       device: { ...DEFAULT_HOST_CONFIG.device, ...value.device },
       packDir: value.packDir,
+      packDirs: Array.isArray(value.packDirs) ? value.packDirs.filter((entry): entry is string => typeof entry === "string") : [],
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

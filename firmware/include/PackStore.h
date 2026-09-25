@@ -16,10 +16,12 @@ struct ExpectedFile {
 class PackStore {
 public:
     bool begin();
-    bool beginTransaction(const String& id, const String& version, const std::vector<ExpectedFile>& files);
+    bool beginTransaction(const String& id, const String& version, const String& digest, const std::vector<ExpectedFile>& files);
     bool writeChunk(const String& relativePath, size_t offset, const std::vector<uint8_t>& data);
     bool commit(const String& id, const String& version);
+    bool activateCached(const String& id, const String& version, const String& digest);
     bool loadRuntime(JsonDocument& target);
+    const String& activeDigest() const { return activeDigest_; }
     const String& error() const { return error_; }
     bool available() const { return available_; }
     bool sdAvailable() const { return sdAvailable_; }
@@ -34,6 +36,9 @@ private:
     bool ensureParentDirectories(fs::FS& storage, const String& path);
     bool verifyFile(fs::FS& storage, const ExpectedFile& expected);
     bool removeTree(fs::FS& storage, const String& path);
+    bool validDigest(const String& digest) const;
+    String readDigest(fs::FS& storage, const String& root) const;
+    bool writeDigest(fs::FS& storage, const String& root, const String& digest);
     void closeTransactionFile();
 
     bool available_{false};
@@ -47,6 +52,8 @@ private:
     String activeStorageName_{"none"};
     String transactionId_;
     String transactionVersion_;
+    String transactionDigest_;
+    String activeDigest_;
     String error_;
     std::vector<ExpectedFile> expectedFiles_;
 };

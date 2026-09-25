@@ -30,6 +30,16 @@ const PACK_CHUNK_BYTES = 2 * 1024;
 const SERIAL_DEBUG = process.env.AGENTLING_SERIAL_DEBUG === "1";
 const CAMERA_MAX_BYTES = 1024 * 1024;
 
+export function packContentDigest(files: Array<{ path: string; size: number; sha256: string }>): string {
+  // Include the generated runtime file as well as assets: changing behavior
+  // or layout must invalidate a cached pack even if its version is unchanged.
+  const hash = createHash("sha256");
+  for (const file of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
+    hash.update(file.path).update("\0").update(String(file.size)).update("\0").update(file.sha256).update("\n");
+  }
+  return hash.digest("hex");
+}
+
 interface PendingSensorRequest {
   resolve(value: SensorSnapshot): void;
   reject(error: Error): void;
@@ -121,6 +131,7 @@ export class DeviceService extends EventEmitter {
     await this.disconnect();
     this.epoch = Math.floor(Date.now() / 1_000);
     this.sequence = 0;
+    this.lastReceivedSequence = 0;
     this.lastAcknowledgedSequence = 0;
     this.port = new SerialPort({ path: portPath, baudRate: this.config.baudRate, autoOpen: false });
     this.port.on("data", (chunk: Buffer) => this.onData(chunk));
@@ -158,6 +169,11 @@ export class DeviceService extends EventEmitter {
     } finally {
       clearInterval(helloTimer);
     }
+    // Firmware retains its last ACK sequence across USB reconnects. Start this
+    // host session above that watermark so stale ACKs cannot make pack chunks
+    // appear confirmed before the device has received them.
+    this.sequence = Math.max(this.sequence, this.lastAcknowledgedSequence);
+    if (SERIAL_DEBUG) console.log(`[agentling:serial] handshake sequence=${this.sequence} ack=${this.lastAcknowledgedSequence}`);
     return this.current();
   }
 
@@ -358,9 +374,32 @@ export class DeviceService extends EventEmitter {
         size: runtime.length,
         sha256: createHash("sha256").update(runtime).digest("hex"),
       };
+      const digest = packContentDigest([...pack.files, runtimeFile]);
+      // Firmware before 0.8 has no digest field and keeps using the full sync.
+      // The cache probe is read-only; a miss falls through to normal transfer.
+      const fresh = await this.diagnostics();
+      if (typeof fresh.diagnostics?.packDigest === "string") {
+        const matches = (status: DeviceStatus) => status.diagnostics?.packDigest === digest &&
+          status.diagnostics?.packId === pack.manifest.id &&
+          status.diagnostics?.packVersion === pack.manifest.version &&
+          !status.diagnostics?.packError && !status.diagnostics?.renderError;
+        if (matches(fresh)) return;
+        // A cache miss leaves the active pack untouched. The readback decides
+        // whether the switch succeeded, even if its serial ACK was lost.
+        try {
+          await this.sendReliable("pack.activate", {
+            id: pack.manifest.id, version: pack.manifest.version, digest,
+          });
+        } catch (error) {
+          if (SERIAL_DEBUG) console.warn("[agentling:serial] cache activation ACK missing", error);
+        }
+        await delay(60);
+        if (matches(await this.diagnostics())) return;
+      }
       await this.sendReliable("pack.manifest", {
         id: pack.manifest.id,
         version: pack.manifest.version,
+        digest,
         protocol: pack.manifest.protocol,
         files: [...pack.files, runtimeFile],
       });
@@ -381,18 +420,33 @@ export class DeviceService extends EventEmitter {
           data: runtime.subarray(offset, Math.min(offset + PACK_CHUNK_BYTES, runtime.length)),
         });
       }
-      await this.sendReliable("pack.commit", { id: pack.manifest.id, version: pack.manifest.version });
+      let commitAckError: Error | undefined;
+      try {
+        await this.sendReliable("pack.commit", { id: pack.manifest.id, version: pack.manifest.version });
+      } catch (error) {
+        // SHA verification and the SD-card rename can finish after the ACK
+        // deadline. The readback below is authoritative even if that ACK was lost.
+        commitAckError = error instanceof Error ? error : new Error(String(error));
+      }
       // An ACK confirms receipt, not that device-side SHA verification and
       // atomic activation succeeded. Read back the active identity so the UI
       // never reports a false-positive sync completion.
       await delay(120);
-      const status = await this.diagnostics();
+      let status: DeviceStatus;
+      try {
+        status = await this.diagnostics();
+      } catch (error) {
+        throw commitAckError ?? error;
+      }
       const diagnostics = status.diagnostics ?? {};
       const activeId = String(diagnostics.packId ?? "");
       const activeVersion = String(diagnostics.packVersion ?? "");
       const packError = String(diagnostics.packError ?? "");
-      if (activeId !== pack.manifest.id || activeVersion !== pack.manifest.version || packError) {
-        throw new Error(packError || `StackChan kept ${activeId || "an unknown pack"} after sync`);
+      if (activeId !== pack.manifest.id || activeVersion !== pack.manifest.version ||
+          (typeof diagnostics.packDigest === "string" && diagnostics.packDigest !== digest) ||
+          packError || diagnostics.renderError) {
+        throw new Error(packError || String(diagnostics.renderError || "") ||
+          `StackChan kept ${activeId || "an unknown pack"} after sync${commitAckError ? `: ${commitAckError.message}` : ""}`);
       }
     } finally {
       this.syncingPack = false;
@@ -437,7 +491,7 @@ export class DeviceService extends EventEmitter {
           const timer = setTimeout(() => {
             this.pendingAcks.delete(sequence);
             reject(new Error(`StackChan did not acknowledge ${type} (${sequence})`));
-          }, 5_000);
+          }, type === "pack.commit" ? 15_000 : 5_000);
           timer.unref();
           this.pendingAcks.set(sequence, { resolve, reject, timer });
         });

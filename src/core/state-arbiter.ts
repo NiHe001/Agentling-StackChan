@@ -17,6 +17,10 @@ const STATE_PRIORITY: Record<AgentState, number> = {
   waiting_approval: 80,
   failed: 90,
 };
+// Terminal states are brief notices. The report timeline keeps the outcome
+// after the task yields visual priority to other ongoing work.
+export const COMPLETED_VISIBLE_MS = 4_000;
+export const FAILED_VISIBLE_MS = 8_000;
 
 const EVENT_STATE: Partial<Record<CanonicalEvent["type"], AgentState>> = {
   "session.started": "idle",
@@ -38,6 +42,7 @@ export class StateArbiter extends EventEmitter {
   private readonly tasks = new Map<string, TaskSnapshot>();
   private readonly reports: TaskReport[] = [];
   private readonly seenEventIds = new Set<string>();
+  // Only explicit task selection is sticky; critical tasks win temporarily.
   private preferredTaskId: string | null = null;
   private overlay: ExpressionOverlay | null = null;
   private readonly disconnectedSources = new Set<string>();
@@ -120,9 +125,6 @@ export class StateArbiter extends EventEmitter {
       occurredAt: event.occurredAt,
     });
     if (this.reports.length > 40) this.reports.length = 40;
-    if (task.state === "failed" || task.state === "waiting_approval") {
-      this.preferredTaskId = task.id;
-    }
     return this.emitSnapshot();
   }
 
@@ -154,7 +156,10 @@ export class StateArbiter extends EventEmitter {
   tick(now = Date.now()): AgentSnapshot {
     let changed = false;
     for (const task of this.tasks.values()) {
-      if (task.state === "completed" && now - task.updatedAt >= 4_000) {
+      if (
+        (task.state === "completed" && now - task.updatedAt >= COMPLETED_VISIBLE_MS) ||
+        (task.state === "failed" && now - task.updatedAt >= FAILED_VISIBLE_MS)
+      ) {
         task.state = "idle";
         task.message = "空闲中";
         task.updatedAt = now;

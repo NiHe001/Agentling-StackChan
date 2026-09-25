@@ -16,7 +16,7 @@ interface Envelope<T> {
 ```
 
 - 每次连接/启动生成新 `epoch`，同一 epoch 内 `sequence` 单调递增。
-- `ack` 是对端已完整接收的累计序号。角色包事务逐帧等待 ACK；清单和 2 KiB 分片超时后最多重试 2 次，提交帧保持单次发送，随后回读设备端包 ID、版本和校验错误。
+- `ack` 是对端已完整接收的累计序号。角色包事务逐帧等待 ACK；清单和 2 KiB 分片超时后最多重试 2 次，提交帧保持单次发送，随后回读设备端包 ID、版本、内容指纹和校验错误。
 - 固件丢弃同一 host epoch 内的重复或倒退序号；host 重连后先发送完整快照。
 - 断线时固件保留最后状态并显示离线标记，不重放上一个 epoch 的 `ActionCue`。
 - 设备诊断请求在本地 USB 链路上最多尝试 3 次，避免角色已提交但末次 `device.hello` 丢失时误报同步失败。
@@ -31,9 +31,10 @@ interface Envelope<T> {
 | `agent.snapshot` | host → device | 多任务、选中任务、每任务最新安全报告与聚合状态；空闲时 1 Hz 心跳 |
 | `widget.snapshot` | host → device | 时间、天气、额度与别名 |
 | `action.cue` | host → device | 一次性行为和带 TTL 的临时表达结果 |
-| `pack.manifest` | host → device | 文件大小与 SHA-256 清单，开始事务 |
+| `pack.manifest` | host → device | 文件大小、SHA-256 清单和内容指纹，开始事务 |
 | `pack.chunk` | host → device | 路径、偏移、二进制块 |
 | `pack.commit` | host → device | 校验全部文件并原子切换 |
+| `pack.activate` | host → device | 按 ID、版本和内容指纹激活 microSD 上已缓存的角色包 |
 | `input.event` | device → host | 点击、滑动和任务切换 |
 | `sensor.request` | host → device | 请求一次只读传感器快照 |
 | `sensor.snapshot` | device → host | 电池、IMU、环境光/接近和触摸快照，带设备运行时间 |
@@ -48,6 +49,15 @@ interface Envelope<T> {
 | `hardware.result` | device → host | 硬件命令接受或拒绝原因 |
 | `ack` | device → host | 显式确认；envelope 同时携带累计 ACK |
 | `error` | device → host | 协议、存储或角色包错误 |
+
+内容指纹由排序后的文件路径、大小和 SHA-256 计算，包含生成的 `pack.runtime.json`。
+桌面端先读取 `device.hello` 中的 `packDigest`：当前包一致则跳过同步；否则尝试
+`pack.activate`，缓存未命中再传输文件。每次切换都以设备诊断回读为准，单独收到 ACK
+不代表角色包已完成校验或激活。旧固件不提供 `packDigest` 时直接走完整传输。
+
+`agent.snapshot` 是权威生命周期状态，`action.cue` 仅负责短暂表情和灯效。
+非循环动作结束后，固件按最新快照恢复工作、空闲或等待等表情；循环行为持续到新的状态或
+行为打断它。临时表达清除或过期时同样恢复到当前真实状态。
 
 ## 隐私边界
 

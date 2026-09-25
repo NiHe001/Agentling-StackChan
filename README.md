@@ -18,7 +18,7 @@ Agentling StackChan 是一个面向 M5Stack StackChan K151/CoreS3 的可配置�
 - 类似 Codex 桌面端的任务动态：按任务显示最新安全报告、当前工具、子任务、审批/失败提醒和
   最近事件时间线；桌面端可点击切换，真机可滑动或触摸底部切换。
 - Codex App Server `account/rateLimits/read` 与 `account/rateLimits/updated`，按窗口时长识别
-  `5H`/`7D`，稀疏更新合并、5 分钟校准、过期和不可用显示。
+  `5H`/`7D`，稀疏更新合并、工作时 15 秒校准、空闲时 1 分钟校准、过期和不可用显示。
 - 可拖动布局编辑、角色包导入/校验、资源清单、SHA-256 校验和原子同步。
 - STDIO MCP：`agentling_show`、`agentling_progress`、`agentling_clear`。表达必须带 TTL，
   Agent 真实事件会立即清除表达，失败和等待批准始终优先。
@@ -31,8 +31,8 @@ Agentling StackChan 是一个面向 M5Stack StackChan K151/CoreS3 的可配置�
   同步灯光调度、传感器快照、物理事件、授权后单次拍照、云台断电、microSD 优先的事务更新
   及内置救援界面。
 - 固件诊断会返回当前微动画偏移、缩放和相位，便于在没有摄像头时确认真机动画引擎持续运行。
-- 状态事件立即推送，内部裁决周期 250 ms、设备心跳 1 秒；额度每分钟主动校准，同时继续
-  接收 App Server 的即时更新。这些读取不调用模型、不消耗 token。
+- 状态事件立即推送，内部裁决周期 250 ms、设备心跳 1 秒；额度工作时最多每 15 秒、
+  空闲时默认每分钟主动校准，同时接收 App Server 的即时更新。这些读取不调用模型、不消耗 token。
 - 为后续 Claude Code 等适配器保留稳定的 `AgentAdapter`、`DataProvider` 和标准事件接口。
 
 ## 快速开始
@@ -63,9 +63,7 @@ npm run dev
 目录和生命周期元数据，不转发或持久化提示词、回答、工具参数及工具输出；状态源暂时不可用时
 会明确显示离线，并自动重连。
 
-如需显示当前工具、审批和子任务等更细的进度，再启动桌面程序并执行：
-
-先启动桌面程序，再执行：
+如需显示当前工具、审批和子任务等更细的进度，先启动桌面程序，再执行：
 
 ```bash
 npm run hooks:install
@@ -87,6 +85,10 @@ codex mcp add agentling -- node /absolute/path/to/Agentling-StackChan/dist/mcp/i
 
 MCP 只是临时表现层，不能把真实状态改成完成、失败或等待批准。
 
+完成和失败会分别短暂显示 4 秒和 8 秒，随后让仍在执行的任务重新成为主状态；
+真机的一次性庆祝、额度提醒等动作会在最后一帧停留约 0.85 秒，再按当前主状态恢复。
+等待批准和离线状态持续显示，直到对应状态变化。
+
 ### 构建和烧录固件
 
 ```bash
@@ -98,6 +100,8 @@ platformio device monitor -d firmware -b 921600
 烧录会替换原厂固件。首次建议先用 M5Burner 保存恢复路径。角色包优先存储到 CoreS3 的
 microSD/TF 卡；未检测到卡时自动回退到内置 LittleFS。详细说明见
 [`firmware/README.md`](firmware/README.md)。
+烧录只更新真机程序；额度刷新、任务裁决和角色包选择属于桌面程序，修改后还需重新构建并
+运行或安装桌面应用。烧录前请先退出占用串口的 Agentling 桌面程序，完成后再启动。
 
 ### macOS 打包
 
@@ -113,6 +117,12 @@ CSC_IDENTITY_AUTO_DISCOVERY=false npm run package:mac
 
 完整格式见 [`docs/CHARACTER_PACK.md`](docs/CHARACTER_PACK.md)。默认包位于
 [`packs/byte-otter`](packs/byte-otter)，程序化救援包仍保留在 [`packs/default`](packs/default)。
+桌面控制台左侧的“角色包”下拉框会列出内置包和已添加的本地包。可用“添加本地包”选择
+角色包目录，再从下拉框选择并点击“应用到屏幕”。设备同步和校验成功后，桌面预览也会切换，
+下次启动继续使用该包。修改当前包文件或保存布局后，可点“重新同步当前包”。
+首次应用或文件内容变化时，桌面端会分块传输并校验；有 microSD 卡时，已传过的角色包按
+内容指纹缓存在设备上，再次选择只发送切换指令。同一角色包未变化时也会直接跳过传输。
+没有 microSD 卡时只能保留当前包，切换到其他包仍需传输。
 主要入口如下：
 
 - `events.yaml`：标准事件到行为的映射。

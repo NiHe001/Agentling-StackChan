@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { resolveLayout } from "../core/layout";
 import type { DesktopSnapshot, Rect, UiConfig, WidgetConfig } from "../core/types";
 import type { SerialPortInfo } from "../main/services/device";
+import type { PackOption } from "../main/pack-library";
 import { DevicePreview } from "./components/DevicePreview";
 
 export function App() {
@@ -11,18 +12,31 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [ports, setPorts] = useState<SerialPortInfo[]>([]);
   const [selectedPort, setSelectedPort] = useState("");
+  const [packs, setPacks] = useState<PackOption[]>([]);
+  const [selectedPackDir, setSelectedPackDir] = useState("");
+  const [applyingPack, setApplyingPack] = useState(false);
+  const activePackRevision = useRef("");
   const [message, setMessage] = useState("正在启动…");
 
   useEffect(() => {
+    const acceptSnapshot = (value: DesktopSnapshot) => {
+      setSnapshot(value);
+      const revision = value.pack ? `${value.pack.sourceDir}:${value.pack.files.find((file) => file.path === "ui.yaml")?.sha256 || ""}` : "";
+      if (value.pack && activePackRevision.current !== revision) {
+        activePackRevision.current = revision;
+        setUi(structuredClone(value.pack.ui));
+        setLayoutName(value.pack.manifest.entryLayout);
+        setSelectedId(null);
+        setSelectedPackDir(value.pack.sourceDir);
+        void window.agentling.listPacks().then(setPacks);
+      }
+    };
     void window.agentling.getSnapshot().then((value) => {
-      setSnapshot(value);
-      setUi(value.pack?.ui ? structuredClone(value.pack.ui) : null);
+      acceptSnapshot(value);
       setMessage("就绪");
-    });
-    return window.agentling.onSnapshot((value) => {
-      setSnapshot(value);
-      setUi((previous) => previous || (value.pack?.ui ? structuredClone(value.pack.ui) : null));
-    });
+    }).catch((error) => setMessage(`加载失败：${String(error)}`));
+    void window.agentling.listPacks().then(setPacks).catch((error) => setMessage(`读取角色包失败：${String(error)}`));
+    return window.agentling.onSnapshot(acceptSnapshot);
   }, []);
 
   const widgets = useMemo(() => (ui ? resolveLayout(ui, layoutName) : []), [ui, layoutName]);
@@ -60,6 +74,28 @@ export function App() {
     }
   };
 
+  const addPack = async () => {
+    try {
+      const added = await window.agentling.addPack();
+      if (!added) return;
+      setPacks(await window.agentling.listPacks());
+      setSelectedPackDir(added.sourceDir);
+      setMessage(`已添加 ${added.name}，点击“应用到屏幕”切换`);
+    } catch (error) {
+      setMessage(`添加角色包失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const applySelectedPack = async () => {
+    if (!selectedPackDir || applyingPack) return;
+    setApplyingPack(true);
+    try {
+      await run("应用角色包到屏幕", () => window.agentling.applyPack(selectedPackDir));
+    } finally {
+      setApplyingPack(false);
+    }
+  };
+
   return (
     <main className="app-shell">
       <header>
@@ -69,16 +105,23 @@ export function App() {
         </div>
         <div className="header-actions">
           <span className={`pill ${snapshot.device.connected ? "online" : ""}`}>{snapshot.device.connected ? "设备在线" : "模拟器"}</span>
-          <button onClick={() => void run("导入角色包", async () => {
-            const pack = await window.agentling.openPack();
-            if (pack) { setUi(structuredClone(pack.ui)); setSelectedId(null); }
-          })}>导入角色包</button>
-          <button className="primary" onClick={() => void run("同步角色包", () => window.agentling.syncPack())}>同步到 StackChan</button>
+          <button onClick={() => void run("重新同步当前包", () => window.agentling.syncPack())}>重新同步当前包</button>
         </div>
       </header>
 
       <section className="workspace">
         <aside className="left-panel">
+          <PanelTitle title="角色包" subtitle={snapshot.pack?.manifest.name || "未加载"} />
+          <label className="pack-picker-label" htmlFor="character-pack">选择角色包</label>
+          <select id="character-pack" value={selectedPackDir} disabled={applyingPack} onChange={(event) => setSelectedPackDir(event.target.value)}>
+            <option value="" disabled>选择角色包…</option>
+            {packs.map((pack) => <option key={pack.sourceDir} value={pack.sourceDir}>{pack.name} · {pack.version}</option>)}
+          </select>
+          <div className="pack-actions">
+            <button className="secondary" disabled={applyingPack} onClick={() => void addPack()}>添加本地包</button>
+            <button className="primary" disabled={!selectedPackDir || !snapshot.device.connected || applyingPack} onClick={() => void applySelectedPack()}>{applyingPack ? "正在应用…" : "应用到屏幕"}</button>
+          </div>
+          <small className="pack-hint">{snapshot.device.connected ? "已缓存的角色包可快速切换；新包或文件更新时会先传到设备。" : "连接 StackChan 后可应用到屏幕。"}</small>
           <PanelTitle title="实时状态" subtitle={snapshot.pack?.manifest.name || "未加载角色"} />
           <div className={`state-card state-${snapshot.agent.aggregateState}`}>
             <span className="state-dot" />

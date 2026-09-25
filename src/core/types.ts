@@ -365,6 +365,7 @@ export type DeviceMessageType =
   | "pack.manifest"
   | "pack.chunk"
   | "pack.commit"
+  | "pack.activate"
   | "input.event"
   | "sensor.request"
   | "sensor.snapshot"

@@ -141,10 +141,12 @@ function CharacterSprite({ snapshot }: { snapshot: DesktopSnapshot }) {
       ? [visual.asset]
       : [];
   const frameMs = typeof visual?.frameMs === "number" ? visual.frameMs : 1_000;
-  const packIdentity = `${snapshot.pack?.manifest.id || "none"}@${snapshot.pack?.manifest.version || "0"}`;
+  const packIdentity = snapshot.pack?.sourceDir || "none";
   const frameSignature = frames.join("|");
+  const assetSignature = frames.map((asset) => `${asset}:${snapshot.pack?.files.find((file) => file.path === asset)?.sha256 || ""}`).join("|");
+  const renderSignature = `${packIdentity}:${assetSignature}`;
   const [frameIndex, setFrameIndex] = useState(0);
-  const [sources, setSources] = useState<string[]>([]);
+  const [loaded, setLoaded] = useState<{ signature: string; sources: string[] }>({ signature: "", sources: [] });
 
   useEffect(() => {
     setFrameIndex(0);
@@ -155,23 +157,24 @@ function CharacterSprite({ snapshot }: { snapshot: DesktopSnapshot }) {
 
   useEffect(() => {
     let active = true;
+    setLoaded({ signature: renderSignature, sources: [] });
     if (frames.length === 0) {
-      setSources([]);
       return () => { active = false; };
     }
     void Promise.all(frames.map(async (asset) => {
-      const cacheKey = `${packIdentity}:${asset}`;
+      const cacheKey = `${packIdentity}:${asset}:${snapshot.pack?.files.find((file) => file.path === asset)?.sha256 || ""}`;
       const cached = assetCache.get(cacheKey);
       if (cached) return cached;
       const value = await window.agentling.getPackAsset(asset);
       if (value) assetCache.set(cacheKey, value);
       return value;
     })).then((values) => {
-      if (active) setSources(values.filter((value): value is string => Boolean(value)));
+      if (active) setLoaded({ signature: renderSignature, sources: values.filter((value): value is string => Boolean(value)) });
     });
     return () => { active = false; };
-  }, [frameSignature, packIdentity]);
+  }, [renderSignature]);
   const animation = typeof visual?.animation === "string" ? visual.animation : "none";
+  const sources = loaded.signature === renderSignature ? loaded.sources : [];
   const source = sources[frameIndex % Math.max(1, sources.length)];
   return (
     <div className={`character-stage atmosphere-${animation}`} data-scene={scene}>
@@ -180,7 +183,7 @@ function CharacterSprite({ snapshot }: { snapshot: DesktopSnapshot }) {
       <span className="character-sparkles" aria-hidden="true"><i /><i /><i /></span>
       <div className={`character-figure visual-${animation}`}>
         {source
-          ? <img className="character-sprite" src={source} alt="Byte Otter character state" />
+          ? <img className="character-sprite" src={source} alt="角色状态" />
           : <Face state={snapshot.agent.aggregateState} scene={snapshot.overlay?.scene} />}
       </div>
     </div>

@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CodexSessionEventAdapter,
   sessionRecordToEvents,
@@ -66,6 +66,26 @@ describe("Codex session event stream", () => {
       type: "event_msg",
       payload: { type: "turn_aborted", turn_id: "turn-3" },
     }, state, 3_000)[0]).toMatchObject({ type: "turn.failed", message: "任务已中断" });
+  });
+
+  it("closes an aborted task after its failure cue unless a new turn begins", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const adapter = new CodexSessionEventAdapter("/unused");
+      const events: string[] = [];
+      adapter.subscribe((event) => events.push(`${event.sessionId}:${event.type}`));
+      adapter["forward"]({ id: "a-failed", source: "codex-session-log", type: "turn.failed", sessionId: "a", occurredAt: Date.now() });
+      adapter["forward"]({ id: "b-failed", source: "codex-session-log", type: "turn.failed", sessionId: "b", occurredAt: Date.now() });
+      await vi.advanceTimersByTimeAsync(4_000);
+      adapter["forward"]({ id: "b-restarted", source: "codex-session-log", type: "turn.started", sessionId: "b", occurredAt: Date.now() });
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(events).toContain("a:session.closed");
+      expect(events).not.toContain("b:session.closed");
+      await adapter.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores Codex internal guardian sessions", () => {

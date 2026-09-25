@@ -1,0 +1,7 @@
+sounds:
+  startup: { type: melody, notes: [587, 740, 988], noteMs: 80, volume: 0.26 }
+  working: { type: melody, notes: [784, 988], noteMs: 55, volume: 0.16 }
+  complete: { type: melody, notes: [659, 784, 988, 1175], noteMs: 90, volume: 0.30 }
+  approval: { type: melody, notes: [988, 784], noteMs: 120, volume: 0.28 }
+  quota: { type: melody, notes: [740, 622], noteMs: 110, volume: 0.22 }
+  error: { type: melody, notes: [392, 330, 262], noteMs: 140, volume: 0.26 }

@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { StateArbiter } from "../../core/state-arbiter";
+import { COMPLETED_VISIBLE_MS, FAILED_VISIBLE_MS, StateArbiter } from "../../core/state-arbiter";
 import type { AgentAdapter, AgentSnapshot, CanonicalEvent } from "../../core/types";
 
 type JsonObject = Record<string, unknown>;
@@ -23,8 +23,6 @@ interface FileCursor {
 
 const SOURCE_ID = "codex-session-log";
 const SOURCE_SESSION_ID = "codex-status-source";
-const COMPLETED_VISIBLE_MS = 4_000;
-const RECENT_FAILURE_MS = 60_000;
 const STARTUP_ACTIVE_WINDOW_MS = 15 * 60_000;
 
 export class CodexSessionEventAdapter extends EventEmitter implements AgentAdapter {
@@ -158,7 +156,7 @@ export class CodexSessionEventAdapter extends EventEmitter implements AgentAdapt
         terminal.type === "input.requested" ||
         terminal.type === "input.resolved" ||
         (terminal.type === "turn.completed" && age <= COMPLETED_VISIBLE_MS) ||
-        (terminal.type === "turn.failed" && age <= RECENT_FAILURE_MS))
+        (terminal.type === "turn.failed" && age <= FAILED_VISIBLE_MS))
     ) {
       for (const event of currentTurn) this.forward(event);
     }
@@ -197,12 +195,13 @@ export class CodexSessionEventAdapter extends EventEmitter implements AgentAdapt
     if (event.type === "turn.started") this.cancelClose(event.sessionId);
     this.arbiter.apply(event);
     this.emit("event", event);
-    if (event.type === "turn.completed") this.scheduleClose(event);
+    if (event.type === "turn.completed" || event.type === "turn.failed") this.scheduleClose(event);
   }
 
   private scheduleClose(event: CanonicalEvent): void {
     this.cancelClose(event.sessionId);
-    const delay = Math.max(0, event.occurredAt + COMPLETED_VISIBLE_MS - Date.now());
+    const visibleMs = event.type === "turn.failed" ? FAILED_VISIBLE_MS : COMPLETED_VISIBLE_MS;
+    const delay = Math.max(0, event.occurredAt + visibleMs - Date.now());
     const timer = setTimeout(() => {
       this.closeTimers.delete(event.sessionId);
       this.forward({

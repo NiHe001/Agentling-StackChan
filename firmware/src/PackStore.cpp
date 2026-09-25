@@ -6,18 +6,39 @@
 #include <SPI.h>
 #include <mbedtls/sha256.h>
 #include <algorithm>
+#include <cctype>
 
 namespace agentling {
 
 static constexpr const char* ACTIVE_ROOT = "/agentling";
 static constexpr const char* STAGING_ROOT = "/agentling.staging";
 static constexpr const char* BACKUP_ROOT = "/agentling.previous";
+static constexpr const char* CACHE_ROOT = "/agentling.cache";
 
 bool PackStore::begin() {
     littleFsAvailable_ = LittleFS.begin(true);
     // CoreS3 exposes its TF slot on the board SPI bus with CS on GPIO4. Use
     // the card when present, while retaining LittleFS as a no-card fallback.
     sdAvailable_ = SD.begin(GPIO_NUM_4, SPI, 25'000'000) && SD.cardType() != CARD_NONE;
+    // A power cut between the two directory renames can leave /agentling
+    // temporarily absent. Recover a valid previous or cached pack on boot.
+    if (sdAvailable_ && !SD.exists(String(ACTIVE_ROOT) + "/pack.runtime.json")) {
+        String recovery;
+        if (SD.exists(String(BACKUP_ROOT) + "/pack.runtime.json")) recovery = BACKUP_ROOT;
+        else if (SD.exists(CACHE_ROOT)) {
+            File cache = SD.open(CACHE_ROOT);
+            File entry;
+            while (cache && (entry = cache.openNextFile())) {
+                const String path = entry.path();
+                const bool candidate = entry.isDirectory() &&
+                    SD.exists(path + "/pack.runtime.json") && !readDigest(SD, path).isEmpty();
+                entry.close();
+                if (candidate) { recovery = path; break; }
+            }
+            if (cache) cache.close();
+        }
+        if (!recovery.isEmpty() && removeTree(SD, ACTIVE_ROOT)) SD.rename(recovery, ACTIVE_ROOT);
+    }
     if (sdAvailable_ && SD.exists(String(ACTIVE_ROOT) + "/pack.runtime.json")) {
         activeStorage_ = &SD;
         activeStorageName_ = "microSD";
@@ -32,6 +53,7 @@ bool PackStore::begin() {
         activeStorageName_ = "LittleFS";
     }
     available_ = activeStorage_ != nullptr;
+    if (activeStorage_) activeDigest_ = readDigest(*activeStorage_, ACTIVE_ROOT);
     if (!available_) error_ = "microSD and LittleFS mount failed; using built-in rescue UI";
     return available_;
 }
@@ -39,12 +61,17 @@ bool PackStore::begin() {
 bool PackStore::beginTransaction(
     const String& id,
     const String& version,
+    const String& digest,
     const std::vector<ExpectedFile>& files
 ) {
     if (!available_) return false;
     closeTransactionFile();
     transactionStorage_ = sdAvailable_ ? static_cast<fs::FS*>(&SD) : activeStorage_;
     if (!transactionStorage_) return false;
+    if (!digest.isEmpty() && !validDigest(digest)) {
+        error_ = "invalid pack digest";
+        return false;
+    }
     if (files.empty() || files.size() > 128) {
         error_ = "invalid pack file count";
         return false;
@@ -57,15 +84,17 @@ bool PackStore::beginTransaction(
         }
         total += file.size;
     }
-    const uint64_t capacity = transactionStorage_ == static_cast<fs::FS*>(&SD)
-        ? SD.totalBytes() : LittleFS.totalBytes();
-    const uint64_t reserve = std::min<uint64_t>(capacity, 64 * 1024);
-    if (total > capacity - reserve) {
-        error_ = "pack exceeds available storage capacity";
-        return false;
-    }
     if (!removeTree(*transactionStorage_, STAGING_ROOT)) {
         error_ = "cannot clear staging directory";
+        return false;
+    }
+    const uint64_t capacity = transactionStorage_ == static_cast<fs::FS*>(&SD)
+        ? SD.totalBytes() : LittleFS.totalBytes();
+    const uint64_t used = transactionStorage_ == static_cast<fs::FS*>(&SD)
+        ? SD.usedBytes() : LittleFS.usedBytes();
+    const uint64_t reserve = std::min<uint64_t>(capacity, 64 * 1024);
+    if (capacity < used || total > capacity - used || capacity - used - total < reserve) {
+        error_ = "not enough free storage for pack; remove old cached packs from microSD";
         return false;
     }
     if (!transactionStorage_->mkdir(STAGING_ROOT)) {
@@ -74,6 +103,7 @@ bool PackStore::beginTransaction(
     }
     transactionId_ = id;
     transactionVersion_ = version;
+    transactionDigest_ = digest;
     expectedFiles_ = files;
     error_ = "";
     return true;
@@ -133,25 +163,80 @@ bool PackStore::commit(const String& id, const String& version) {
     for (const auto& expected : expectedFiles_) {
         if (!verifyFile(storage, expected)) return false;
     }
-    if (!removeTree(storage, BACKUP_ROOT)) {
-        error_ = "cannot clear previous rollback copy";
+    if (!transactionDigest_.isEmpty() && !writeDigest(storage, STAGING_ROOT, transactionDigest_)) return false;
+    // A verified active pack is cacheable on microSD. LittleFS retains only
+    // the current pack because space there is much tighter.
+    const bool cachePrevious = transactionStorage_ == static_cast<fs::FS*>(&SD) &&
+        !transactionDigest_.isEmpty() && validDigest(readDigest(storage, ACTIVE_ROOT));
+    String previousPath = BACKUP_ROOT;
+    if (cachePrevious) {
+        if (!storage.exists(CACHE_ROOT) && !storage.mkdir(CACHE_ROOT)) {
+            error_ = "cannot create pack cache";
+            return false;
+        }
+        previousPath = String(CACHE_ROOT) + "/" + readDigest(storage, ACTIVE_ROOT);
+    }
+    if (!removeTree(storage, previousPath)) {
+        error_ = "cannot clear previous pack destination";
         return false;
     }
-    if (storage.exists(ACTIVE_ROOT) && !storage.rename(ACTIVE_ROOT, BACKUP_ROOT)) {
-        error_ = "cannot create pack rollback copy";
+    if (storage.exists(ACTIVE_ROOT) && !storage.rename(ACTIVE_ROOT, previousPath)) {
+        error_ = "cannot preserve previous pack";
         return false;
     }
     if (!storage.rename(STAGING_ROOT, ACTIVE_ROOT)) {
-        if (storage.exists(BACKUP_ROOT)) storage.rename(BACKUP_ROOT, ACTIVE_ROOT);
+        if (storage.exists(previousPath)) storage.rename(previousPath, ACTIVE_ROOT);
         error_ = "cannot activate pack; previous pack restored";
         return false;
     }
     transactionId_ = "";
     transactionVersion_ = "";
+    activeDigest_ = transactionDigest_;
+    transactionDigest_ = "";
     expectedFiles_.clear();
     activeStorage_ = transactionStorage_;
     activeStorageName_ = activeStorage_ == static_cast<fs::FS*>(&SD) ? "microSD" : "LittleFS";
     transactionStorage_ = nullptr;
+    error_ = "";
+    return true;
+}
+
+bool PackStore::activateCached(const String& id, const String& version, const String& digest) {
+    if (!sdAvailable_ || !validDigest(digest)) return false;
+    if (activeStorage_ == static_cast<fs::FS*>(&SD) && activeDigest_ == digest) return true;
+    const String cachedPath = String(CACHE_ROOT) + "/" + digest;
+    if (readDigest(SD, cachedPath) != digest) return false;
+    // Do not trust the directory name alone: a cached runtime must still
+    // identify the pack the host requested before any rename takes place.
+    File runtime = SD.open(cachedPath + "/pack.runtime.json", FILE_READ);
+    if (!runtime) return false;
+    JsonDocument candidate;
+    const auto parseError = deserializeJson(candidate, runtime);
+    runtime.close();
+    if (parseError || String(candidate["manifest"]["id"] | "") != id ||
+        String(candidate["manifest"]["version"] | "") != version) return false;
+
+    String previousPath = BACKUP_ROOT;
+    if (SD.exists(ACTIVE_ROOT) && validDigest(readDigest(SD, ACTIVE_ROOT))) {
+        previousPath = String(CACHE_ROOT) + "/" + readDigest(SD, ACTIVE_ROOT);
+    }
+    if (!removeTree(SD, previousPath)) {
+        error_ = "cannot clear previous pack destination";
+        return false;
+    }
+    const bool hadActive = SD.exists(ACTIVE_ROOT);
+    if (hadActive && !SD.rename(ACTIVE_ROOT, previousPath)) {
+        error_ = "cannot cache active pack";
+        return false;
+    }
+    if (!SD.rename(cachedPath, ACTIVE_ROOT)) {
+        if (hadActive) SD.rename(previousPath, ACTIVE_ROOT);
+        error_ = "cannot activate cached pack; previous pack restored";
+        return false;
+    }
+    activeStorage_ = &SD;
+    activeStorageName_ = "microSD";
+    activeDigest_ = digest;
     error_ = "";
     return true;
 }
@@ -181,6 +266,36 @@ bool PackStore::loadRuntime(JsonDocument& target) {
 
 bool PackStore::safePath(const String& path) const {
     return !path.isEmpty() && !path.startsWith("/") && path.indexOf("..") < 0 && path.indexOf('\\') < 0;
+}
+
+bool PackStore::validDigest(const String& digest) const {
+    if (digest.length() != 64) return false;
+    for (size_t index = 0; index < digest.length(); ++index) {
+        const char c = digest[index];
+        if (!isxdigit(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+}
+
+String PackStore::readDigest(fs::FS& storage, const String& root) const {
+    File file = storage.open(root + "/pack.digest", FILE_READ);
+    if (!file) return "";
+    String digest = file.readStringUntil('\n');
+    file.close();
+    digest.trim();
+    digest.toLowerCase();
+    return validDigest(digest) ? digest : "";
+}
+
+bool PackStore::writeDigest(fs::FS& storage, const String& root, const String& digest) {
+    File file = storage.open(root + "/pack.digest", FILE_WRITE);
+    if (!file || file.print(digest) != digest.length()) {
+        if (file) file.close();
+        error_ = "cannot write pack digest";
+        return false;
+    }
+    file.close();
+    return true;
 }
 
 bool PackStore::ensureParentDirectories(fs::FS& storage, const String& path) {

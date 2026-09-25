@@ -2,6 +2,8 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from "el
 import path from "node:path";
 import { AgentlingRuntime } from "./runtime";
 import { loadHostConfig, saveHostConfig } from "./config";
+import { listPackOptions, type PackOption } from "./pack-library";
+import { compilePack } from "../core/pack";
 import type { DesktopSnapshot, UiConfig } from "../core/types";
 
 let mainWindow: BrowserWindow | null = null;
@@ -38,9 +40,8 @@ function createWindow(): BrowserWindow {
 }
 
 function trayImage() {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7" fill="none" stroke="black" stroke-width="2"/><circle cx="6.5" cy="8" r="1"/><circle cx="11.5" cy="8" r="1"/><path d="M5.5 11c1.6 1.6 5.4 1.6 7 0" fill="none" stroke="black" stroke-width="1.5" stroke-linecap="round"/></svg>`;
-  const image = nativeImage.createFromDataURL(
-    `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
+  const image = nativeImage.createFromPath(
+    path.join(app.getAppPath(), "packs", "byte-otter", "assets", "tray-iconTemplate@2x.png"),
   );
   image.setTemplateImage(true);
   return image;
@@ -79,7 +80,20 @@ async function bootstrap(): Promise<void> {
   const configFile = path.join(app.getPath("userData"), "config.yaml");
   const config = await loadHostConfig(configFile);
   const defaultPackDir = path.join(app.getAppPath(), "packs", "byte-otter");
+  const bundledPacksDir = path.join(app.getAppPath(), "packs");
   runtime = new AgentlingRuntime(config, defaultPackDir);
+  const packOptions = () => {
+    const activeDir = runtime?.snapshot().pack?.sourceDir;
+    return listPackOptions(bundledPacksDir, [
+      ...(config.packDirs ?? []),
+      ...(config.packDir ? [config.packDir] : []),
+      ...(activeDir ? [activeDir] : []),
+    ]);
+  };
+  const rememberPack = async (directory: string) => {
+    config.packDirs = [...new Set([...(config.packDirs ?? []), directory])];
+    await saveHostConfig(configFile, config);
+  };
   runtime.on("snapshot", (snapshot: DesktopSnapshot) => {
     updateTray(snapshot);
     mainWindow?.webContents.send("agentling:snapshot", snapshot);
@@ -96,13 +110,35 @@ async function bootstrap(): Promise<void> {
     return status;
   });
   ipcMain.handle("agentling:device:disconnect", () => runtime?.device.disconnect());
+  ipcMain.handle("agentling:pack:list", packOptions);
+  ipcMain.handle("agentling:pack:add", async () => {
+    const selected = await dialog.showOpenDialog({ properties: ["openDirectory"] });
+    if (selected.canceled || !selected.filePaths[0]) return null;
+    const pack = await compilePack(selected.filePaths[0]);
+    await rememberPack(pack.sourceDir);
+    return { sourceDir: pack.sourceDir, id: pack.manifest.id, name: pack.manifest.name, version: pack.manifest.version } satisfies PackOption;
+  });
+  ipcMain.handle("agentling:pack:apply", async (_event, directory: string) => {
+    if (!(await packOptions()).some((option) => option.sourceDir === directory)) {
+      throw new Error("所选角色包已不可用，请重新添加");
+    }
+    if (!runtime) throw new Error("桌面服务尚未就绪");
+    const pack = await runtime.applyPack(directory);
+    config.packDir = pack.sourceDir;
+    try {
+      await rememberPack(pack.sourceDir);
+    } catch (error) {
+      throw new Error(`角色包已应用到屏幕，但保存下次启动的选择失败：${String(error)}`);
+    }
+    return pack;
+  });
   ipcMain.handle("agentling:pack:open", async () => {
     const selected = await dialog.showOpenDialog({ properties: ["openDirectory"] });
     if (selected.canceled || !selected.filePaths[0]) return null;
     const pack = await runtime?.loadPack(selected.filePaths[0]);
     if (runtime && pack) {
       runtime.config.packDir = pack.sourceDir;
-      await saveHostConfig(configFile, runtime.config);
+      await rememberPack(pack.sourceDir);
     }
     return pack;
   });

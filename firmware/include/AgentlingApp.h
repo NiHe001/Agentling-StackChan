@@ -45,6 +45,7 @@ private:
     void parsePackManifest(CborReader& reader);
     void parsePackChunk(CborReader& reader);
     void parsePackCommit(CborReader& reader);
+    void parsePackActivate(CborReader& reader);
     void parseSensorRequest(CborReader& reader);
     void parseCameraRequest(CborReader& reader);
     void parseLightCommand(CborReader& reader);
@@ -72,6 +73,7 @@ private:
 
     void startBehavior(const String& name);
     void updateBehavior();
+    void restoreStateBehavior();
     void applyBehaviorStep(JsonObjectConst step);
     void setExpression(const String& name);
     void applyMotion(const String& name);
@@ -81,6 +83,7 @@ private:
     void applyLight(const String& name);
     void setDirectLight(uint32_t color, uint8_t brightness, const String& mode,
                         uint32_t periodMs, uint32_t ttlMs);
+    bool updatePowerButton();
     void updateLight();
     void updateServoMotion();
     void finishServoMotion(bool ok, const char* error = nullptr);
@@ -138,6 +141,7 @@ private:
     String behaviorName_;
     size_t behaviorStep_{0};
     uint32_t behaviorStartedAt_{0};
+    bool overlayActive_{false};
     uint32_t torqueReleaseAt_{0};
     uint32_t lastHostMessageAt_{0};
     uint32_t hostEpoch_{0};
@@ -163,6 +167,7 @@ private:
     uint32_t savedLightColor_{0};
     uint8_t savedLightBrightness_{0};
     uint32_t savedLightPeriodMs_{1000};
+    bool shuttingDown_{false};
     uint8_t servoPhase_{0};
     bool servoPowerEnabled_{false};
     int servoYawTenths_{INT_MIN};
